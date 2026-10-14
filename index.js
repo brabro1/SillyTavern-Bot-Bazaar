@@ -386,7 +386,12 @@ function buildCard(detail, book) {
             fav: false,
             world: book ? book.name : '',
             depth_prompt: { prompt: '', depth: 4, role: 'system' },
-            janitor: { id: detail.id, title: str(detail.name), source: `${SITE}/characters/${detail.id}` },
+            janitor: {
+                id: detail.id,
+                title: str(detail.name),
+                source: `${SITE}/characters/${detail.id}`,
+                ...(detail.definition_source ? { definition_source: detail.definition_source } : {}),
+            },
         },
     };
     if (book) data.character_book = book;
@@ -477,6 +482,78 @@ async function avatarPng(detail, displayName) {
     return { bytes: new Uint8Array(await blob.arrayBuffer()), placeholder: !bitmap };
 }
 
+// ---------------------------------------------------------------------------------------------- outside definition
+
+const JANNY = 'https://jannyai.com/characters/';
+
+/** Reads the character card stored inside a PNG (tEXt chunk "ccv3" or "chara"). */
+function readCardFromPng(bytes) {
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const found = {};
+    for (let offset = 8; offset + 12 <= bytes.length;) {
+        const length = view.getUint32(offset);
+        const type = String.fromCharCode(...bytes.subarray(offset + 4, offset + 8));
+        if (type === 'tEXt') {
+            const data = bytes.subarray(offset + 8, offset + 8 + length);
+            const split = data.indexOf(0);
+            const keyword = new TextDecoder('latin1').decode(data.subarray(0, split)).toLowerCase();
+            if (keyword === 'chara' || keyword === 'ccv3') found[keyword] = data.subarray(split + 1);
+        }
+        if (type === 'IEND') break;
+        offset += 12 + length;
+    }
+    const raw = found.chara || found.ccv3;
+    if (!raw) return null;
+    const binary = atob(new TextDecoder('latin1').decode(raw));
+    return JSON.parse(new TextDecoder().decode(Uint8Array.from(binary, c => c.charCodeAt(0))));
+}
+
+async function readCardFile(file) {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const isPng = bytes[0] === 0x89 && bytes[1] === 0x50;
+    const card = isPng ? readCardFromPng(bytes) : JSON.parse(new TextDecoder().decode(bytes));
+    const data = card?.data && typeof card.data === 'object' ? card.data : card;
+    if (!data || typeof data !== 'object' || !(str(data.description).trim() || str(data.personality).trim() || str(data.scenario).trim())) {
+        throw new Error('That file does not contain a character definition.');
+    }
+    return data;
+}
+
+/** SillyTavern's own server can download JannyAI's copy — when JannyAI's bot protection lets that server through. */
+async function fetchJannyCopy(id) {
+    const response = await fetch('/api/content/importURL', {
+        method: 'POST',
+        headers: ctx().getRequestHeaders(),
+        body: JSON.stringify({ url: `${SITE}/characters/${id}` }),
+    });
+    if (!response.ok) throw new Error(`SillyTavern could not download it (${response.status}).`);
+    return readCardFile(await response.blob());
+}
+
+/** Fills the parts JanitorAI withholds with the ones from another copy of the card. */
+function withOutsideDefinition(detail, data) {
+    const hasGreeting = str(detail.first_message).trim() || (Array.isArray(detail.first_messages) && detail.first_messages.some(g => str(g).trim()));
+    const merged = {
+        ...detail,
+        personality: [data.description, data.personality].map(str).filter(t => t.trim()).join('\n\n'),
+        scenario: str(data.scenario),
+        example_dialogs: str(data.mes_example),
+        definition_source: 'jannyai',
+    };
+    if (!hasGreeting) {
+        merged.first_message = str(data.first_mes);
+        merged.first_messages = Array.isArray(data.alternate_greetings) ? data.alternate_greetings : [];
+    }
+    return merged;
+}
+
+const looseName = (name) => str(name).toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
+
+function sameCharacter(detail, data) {
+    const other = looseName(data.name);
+    return !!other && [detail.name, detail.chat_name].map(looseName).some(n => n && (n.includes(other) || other.includes(n)));
+}
+
 // ---------------------------------------------------------------------------------------------- import
 
 async function importCharacter(detail) {
@@ -487,7 +564,7 @@ async function importCharacter(detail) {
         const proceed = await Popup.show.confirm(
             'Definition not available',
             signedIn()
-                ? 'The creator has hidden the definition of this character, so JanitorAI does not send it. Import what is public (name, avatar, description, tags, greetings and any shared lorebook)?'
+                ? 'The creator has hidden the definition of this character, so JanitorAI does not send it. Import what is public (name, avatar, description, tags, greetings and any shared lorebook)? To add the definition from a JannyAI copy instead, cancel and use the buttons under "Definition hidden".'
                 : 'Your JanitorAI account is not connected, so the definition and lorebook are not available. Import only the public info (name, avatar, description, tags)?',
         );
         if (!proceed) return false;
@@ -929,6 +1006,17 @@ async function openDetail(id) {
                 <span class="${scripts.shared.length ? 'jai_ok' : (scripts.private.length ? 'jai_bad' : '')}" title="${esc(scriptNames)}"><i class="fa-solid fa-book-atlas"></i> ${esc(bookFact)}</span>
                 ${signedIn() ? '' : '<span class="jai_link" data-jai-connect><i class="fa-solid fa-key"></i> Connect account</span>'}
             </div>
+            ${!defined && signedIn() ? `
+            <div class="jai_outside">
+                <b>Definition hidden on JanitorAI.</b> JannyAI may have its own copy (possibly older). If it does, it can be combined with the greetings, avatar and lorebook from here:
+                <div class="jai_actions">
+                    <div class="menu_button menu_button_icon jai_janny_auto"><i class="fa-solid fa-wand-magic-sparkles"></i><span>Try to fetch it</span></div>
+                    <a class="menu_button menu_button_icon" href="${JANNY}${esc(detail.id)}" target="_blank" rel="noopener"><i class="fa-solid fa-up-right-from-square"></i><span>Open on JannyAI</span></a>
+                    <div class="menu_button menu_button_icon jai_janny_file"><i class="fa-solid fa-file-arrow-up"></i><span>Use downloaded card…</span></div>
+                </div>
+                <input type="file" class="jai_janny_input" accept=".png,.json,image/png,application/json" hidden>
+                <div class="jai_note jai_janny_note">If fetching fails: open the JannyAI page, download the card there, then pick that file with "Use downloaded card".</div>
+            </div>` : ''}
             <div class="jai_tags">${tags}</div>
             <div class="jai_description">${sanitize(detail.description)}</div>
         </div>`;
@@ -939,6 +1027,43 @@ async function openDetail(id) {
     box.querySelector('.jai_back').addEventListener('click', () => ($('#jai_grid').children.length ? (setView('grid'), showMessage('')) : loadList()));
     box.querySelector('.jai_raw').addEventListener('click', async () => {
         await copyText(JSON.stringify(detail, null, 2), 'Raw character data copied to the clipboard.');
+    });
+
+    // Definition from another copy of the card (JannyAI), merged in at import time.
+    let outside = null;
+    const useOutside = async (load) => {
+        const note = box.querySelector('.jai_janny_note');
+        try {
+            const data = await load();
+            if (!sameCharacter(detail, data)) {
+                const ok = await ctx().Popup.show.confirm('Different character?', `That card is named "${str(data.name)}", which does not look like "${str(detail.name)}". Use its definition anyway?`);
+                if (!ok) return;
+            }
+            outside = data;
+            const fact = box.querySelector('.jai_facts span');
+            fact.className = 'jai_ok';
+            fact.innerHTML = '<i class="fa-solid fa-check"></i> Definition from the JannyAI copy (may be older than the JanitorAI version)';
+            note.textContent = 'Definition loaded. Press "Import to SillyTavern".';
+            note.classList.add('jai_ok');
+        } catch (error) {
+            console.warn(TAG, 'Outside definition failed', error);
+            note.classList.remove('jai_ok');
+            note.textContent = `${error?.message || error} Open the JannyAI page, download the card there, then pick that file with "Use downloaded card". If JannyAI has no page for this character, there is no copy to use.`;
+        }
+    };
+    const autoButton = box.querySelector('.jai_janny_auto');
+    autoButton?.addEventListener('click', async () => {
+        if (autoButton.classList.contains('disabled')) return;
+        autoButton.classList.add('disabled');
+        await useOutside(() => fetchJannyCopy(detail.id));
+        autoButton.classList.remove('disabled');
+    });
+    const fileInput = box.querySelector('.jai_janny_input');
+    box.querySelector('.jai_janny_file')?.addEventListener('click', () => fileInput.click());
+    fileInput?.addEventListener('change', async () => {
+        const file = fileInput.files?.[0];
+        fileInput.value = '';
+        if (file) await useOutside(() => readCardFile(file));
     });
 
     const bookButton = box.querySelector('.jai_book_only');
@@ -961,7 +1086,7 @@ async function openDetail(id) {
         importButton.classList.add('disabled');
         importButton.querySelector('span').textContent = 'Importing…';
         try {
-            if (await importCharacter(detail)) closeBrowser();
+            if (await importCharacter(outside ? withOutsideDefinition(detail, outside) : detail)) closeBrowser();
         } catch (error) {
             console.error(TAG, 'Import failed', error);
             toastr.error(String(error?.message || error), 'Janitor Importer: import failed');

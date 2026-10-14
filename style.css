@@ -355,3 +355,16 @@
 #jai_browser .jai_message li {
     line-height: 1.9;
 }
+
+#jai_browser .jai_outside {
+    margin: 10px 0;
+    padding: 10px 12px;
+    border: 1px solid var(--SmartThemeBorderColor, #444);
+    border-radius: 8px;
+    background: rgba(127, 127, 127, 0.08);
+    line-height: 1.45;
+}
+
+#jai_browser .jai_outside .jai_actions {
+    margin: 8px 0 6px;
+}

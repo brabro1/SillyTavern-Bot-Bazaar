@@ -50,6 +50,19 @@ The extension then works through your open JanitorAI tab.
   public parts only: name, avatar, description, tags and greetings.
 - JanitorAI "advanced" (code) scripts cannot be converted and are skipped.
 
+## Hidden definitions and JannyAI
+
+When a definition is hidden, the character page offers to use **JannyAI's copy** of the card instead
+(JannyAI is a separate site that publishes its own, possibly older, copies):
+
+- **Try to fetch it** asks your SillyTavern server to download the copy. JannyAI's bot protection
+  often blocks this.
+- Otherwise press **Open on JannyAI**, download the card there yourself, and hand the file to the
+  extension with **Use downloaded card**.
+
+The extension then imports one character: definition from the JannyAI copy, greetings, avatar, tags
+and lorebook from JanitorAI. If JannyAI has no copy, there is nothing to add.
+
 This project is not affiliated with JanitorAI or SillyTavern. Respect creators' work.
 
 ## License
