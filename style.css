@@ -1625,3 +1625,172 @@
         font-size: 16px;
     }
 }
+
+/* ---------- favorites star ---------- */
+
+#jai_browser .jai_fav {
+    position: absolute;
+    top: 6px;
+    left: 6px;
+    z-index: 2;
+    display: grid;
+    place-items: center;
+    width: 30px;
+    height: 30px;
+    border-radius: 50%;
+    background: rgba(0, 0, 0, 0.55);
+    color: #fff;
+    cursor: pointer;
+    transition: transform 0.12s, background 0.12s;
+}
+
+#jai_browser .jai_fav:hover {
+    transform: scale(1.1);
+    background: rgba(0, 0, 0, 0.75);
+}
+
+#jai_browser .jai_fav.jai_fav_on,
+#jai_browser .jai_favbtn.jai_fav_on i {
+    color: #facc15;
+}
+
+#jai_browser.jai_theme_chub .jai_fav {
+    top: 4px;
+    left: 4px;
+    width: 26px;
+    height: 26px;
+    font-size: 12px;
+}
+
+/* ---------- favorites & library ---------- */
+
+#jai_browser .jai_ltoolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+}
+
+#jai_browser .jai_ltoolbar .jai_lsort {
+    width: auto;
+    margin: 0;
+    padding: 5px 8px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 8px;
+    background-color: #1e1f24;
+    font-size: 13px;
+}
+
+#jai_browser .jai_lcard {
+    display: flex;
+    gap: 10px;
+    min-width: 0;
+    padding: 10px;
+    border: 1px solid var(--jai-line);
+    border-radius: 10px;
+    background: linear-gradient(160deg, rgba(36, 16, 79, 0.75), rgba(18, 9, 43, 0.85));
+}
+
+#jai_browser .jai_lthumb {
+    flex: none;
+    display: grid;
+    place-items: center;
+    width: 84px;
+    height: 112px;
+    border-radius: 8px;
+    overflow: hidden;
+    background: rgba(0, 0, 0, 0.35);
+    color: var(--jai-dim);
+    font-size: 26px;
+}
+
+#jai_browser .jai_lthumb img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    object-position: top;
+}
+
+#jai_browser .jai_lbody {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+    flex: 1;
+}
+
+#jai_browser .jai_lname {
+    font-weight: 700;
+    font-size: 14px;
+    color: var(--jai-pink);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+#jai_browser .jai_lmeta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px 10px;
+    font-size: 12px;
+}
+
+#jai_browser .jai_site {
+    padding: 0 7px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 700;
+}
+
+#jai_browser .jai_site_janitor {
+    background: rgba(246, 122, 243, 0.18);
+    color: #f9a8f5;
+}
+
+#jai_browser .jai_site_chub {
+    background: rgba(99, 102, 241, 0.25);
+    color: #a5b4fc;
+}
+
+#jai_browser .jai_lactions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: auto;
+}
+
+#jai_browser .jai_btn.jai_danger:hover {
+    border-color: #f87171;
+    background: rgba(220, 38, 38, 0.35);
+}
+
+#jai_browser:not(.jai_theme_chub) .jai_grid:has(> .jai_lcard) {
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+}
+
+#jai_browser .jai_accounts {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 10px 12px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 8px;
+    background: rgba(0, 0, 0, 0.2);
+    font-size: 13px;
+}
+
+@media (max-width: 700px) {
+    #jai_browser:not(.jai_theme_chub) .jai_grid:has(> .jai_lcard) {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    #jai_browser .jai_lthumb {
+        width: 72px;
+        height: 96px;
+    }
+
+    #jai_browser .jai_ltoolbar .jai_btn span {
+        font-size: 12px;
+    }
+}

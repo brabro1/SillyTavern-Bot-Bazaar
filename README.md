@@ -34,9 +34,19 @@ Open it with the store button next to "Import content from external URL" in the 
 - Paste a `janitorai.com/characters/…`, `janitorai.com/profiles/…`, `chub.ai/characters/…` or
   `chub.ai/lorebooks/…` link into the search box to jump straight to it.
 
+## Favorites and Library
+
+- **Favorites** collects bots from both sites in one tab. Press the ☆ star on any card or character page.
+  **Get JanitorAI favorites** / **Get Chub favorites** bring in the favorites from your accounts on those
+  sites. Favorites are stored on your SillyTavern server, so every device using it sees the same list.
+- **Library** shows every character you imported with Bot Bazaar: open its chat, jump back to its page,
+  or delete it (optionally together with its lorebook).
+
 ## Chub
 
-Needs nothing — Chub's API is public. Linked lorebooks are merged with the card's own lorebook.
+Browsing needs nothing — Chub's API is public. Linked lorebooks are merged with the card's own lorebook.
+Only **Get Chub favorites** needs your Chub login: press the same token bookmark on a signed-in chub.ai tab,
+then **Paste & connect**.
 
 ## JanitorAI: connecting your account
 
