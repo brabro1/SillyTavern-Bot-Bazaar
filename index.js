@@ -918,22 +918,56 @@ function fullDate(iso) {
     return time ? new Date(time).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }) : '';
 }
 
-// Creators style their descriptions (colours, fonts, borders, even whole <style> blocks). Keep that styling, but only
-// properties that cannot move things out of the description box or reach outside it.
-const SAFE_CSS_PROPERTY = /^(--[\w-]+|color|background(-color|-image|-size|-position|-repeat|-clip|-origin)?|text-[\w-]+|font(-[\w-]+)?|line-height|letter-spacing|word-spacing|word-break|overflow-wrap|white-space|margin(-[\w-]+)?|padding(-[\w-]+)?|border(-[\w-]+)?|outline(-[\w-]+)?|box-shadow|box-sizing|(max-|min-)?(width|height)|display|opacity|vertical-align|list-style(-[\w-]+)?|gap|row-gap|column-gap|justify-[\w-]+|align-[\w-]+|place-[\w-]+|flex(-[\w-]+)?|order|grid(-[\w-]+)?|overflow(-[xy])?|float|clear|filter|animation(-[\w-]+)?|transition(-[\w-]+)?|cursor|object-fit|object-position|aspect-ratio|columns?(-[\w-]+)?|caret-color|accent-color)$/i;
-const UNSAFE_CSS_VALUE = /expression\s*\(|javascript:|url\(\s*['"]?(?!https:)/i;
+// Creators style their descriptions (colours, fonts, layouts, even whole <style> blocks or full web pages).
+// Keep that styling, but only properties that cannot escape the description box (which clips and isolates it).
+const SAFE_CSS_PROPERTY = /^(--[\w-]+|color|background(-[\w-]+)?|text-[\w-]+|font(-[\w-]+)?|line-height|letter-spacing|word-spacing|word-break|overflow-wrap|white-space|hyphens|tab-size|direction|writing-mode|unicode-bidi|margin(-[\w-]+)?|padding(-[\w-]+)?|border(-[\w-]+)?|outline(-[\w-]+)?|box-shadow|box-sizing|(max-|min-)?(width|height|inline-size|block-size)|display|visibility|opacity|vertical-align|list-style(-[\w-]+)?|gap|row-gap|column-gap|justify-[\w-]+|align-[\w-]+|place-[\w-]+|flex(-[\w-]+)?|order|grid(-[\w-]+)?|overflow(-[\w-]+)?|float|clear|filter|backdrop-filter|mix-blend-mode|isolation|animation(-[\w-]+)?|transition(-[\w-]+)?|transform(-[\w-]+)?|translate|rotate|scale|perspective(-origin)?|cursor|pointer-events|user-select|object-fit|object-position|aspect-ratio|columns?(-[\w-]+)?|caret-color|accent-color|position|top|right|bottom|left|inset(-[\w-]+)?|z-index|content|quotes|counter-[\w-]+|table-layout|caption-side|empty-cells|clip-path|mask(-[\w-]+)?|-webkit-[\w-]+|scrollbar-[\w-]+|will-change|contain)$/i;
+// Only https images may load; the look-ahead covers url(x), url('x') and url("x") alike.
+const UNSAFE_CSS_VALUE = /expression\s*\(|javascript:|url\(\s*(?!['"]?https:)|-moz-binding|behavior\s*:/i;
+const FONT_HOSTS = /^https:\/\/(fonts\.googleapis\.com|fonts\.bunny\.net|api\.fontshare\.com)\//i;
 
-const safeDeclarations = (style) => {
-    const kept = [];
-    for (let i = 0; i < style.length; i++) {
-        const prop = style[i];
-        const value = style.getPropertyValue(prop);
-        if (SAFE_CSS_PROPERTY.test(prop) && value && !UNSAFE_CSS_VALUE.test(value)) {
-            kept.push(`${prop}:${value}${style.getPropertyPriority(prop) ? ' !important' : ''}`);
+/** Splits "a: b; c: url(x;y)" into declarations, respecting quotes and parentheses. */
+function splitDeclarations(text) {
+    const out = [];
+    let current = '';
+    let depth = 0;
+    let quote = null;
+    for (const ch of str(text)) {
+        if (quote) {
+            if (ch === quote) quote = null;
+        } else if (ch === '"' || ch === '\'') {
+            quote = ch;
+        } else if (ch === '(') {
+            depth++;
+        } else if (ch === ')') {
+            depth = Math.max(0, depth - 1);
+        } else if (ch === ';' && depth === 0) {
+            out.push(current);
+            current = '';
+            continue;
         }
+        current += ch;
     }
-    return kept.join(';');
-};
+    if (current.trim()) out.push(current);
+    return out;
+}
+
+/**
+ * Keeps the safe declarations of a style text exactly as the creator wrote them (so shorthands built from CSS
+ * variables survive). "position: fixed" becomes "absolute" so nothing can pin itself over SillyTavern.
+ */
+function filterCss(text) {
+    return splitDeclarations(text).map((declaration) => {
+        const i = declaration.indexOf(':');
+        if (i < 0) return null;
+        const prop = declaration.slice(0, i).trim().toLowerCase();
+        let value = declaration.slice(i + 1).trim();
+        if (!SAFE_CSS_PROPERTY.test(prop) || !value || UNSAFE_CSS_VALUE.test(value)) return null;
+        if (prop === 'position' && /fixed/i.test(value)) value = 'absolute';
+        return `${prop}:${value}`;
+    }).filter(Boolean).join(';');
+}
+
+const prefixClasses = (selector) => selector.replace(/\.(-?[_a-zA-Z][\w-]*)/g, '.u-$1');
 
 /** Rewrites a creator's <style> block so every rule only applies inside their description. */
 function scopeCss(css, scope) {
@@ -947,18 +981,25 @@ function scopeCss(css, scope) {
     const walk = (rules) => {
         for (const rule of rules) {
             if (rule instanceof CSSStyleRule) {
-                const declarations = safeDeclarations(rule.style);
+                const declarations = filterCss(rule.style.cssText);
                 if (!declarations) continue;
                 const selector = rule.selectorText.split(',')
-                    .map(s => s.trim().replace(/^(html|body|:root)\b\s*/i, '').replace(/\.(-?[_a-zA-Z][\w-]*)/g, '.u-$1'))
-                    .map(s => (s ? `${scope} ${s}` : scope))
+                    .map(s => prefixClasses(s.trim().replace(/^((html|body|:root)\b\s*)+/i, '')))
+                    // "body" becomes the description box itself; "body::before" / "body:hover" stay attached to it.
+                    .map(s => (!s ? scope : (s.startsWith(':') ? `${scope}${s}` : `${scope} ${s}`)))
                     .join(', ');
                 out.push(`${selector}{${declarations}}`);
             } else if (rule instanceof CSSMediaRule) {
                 out.push(`@media ${rule.conditionText}{`);
                 walk(rule.cssRules);
                 out.push('}');
+            } else if (rule instanceof CSSSupportsRule) {
+                out.push(`@supports ${rule.conditionText}{`);
+                walk(rule.cssRules);
+                out.push('}');
             } else if (rule instanceof CSSKeyframesRule && !UNSAFE_CSS_VALUE.test(rule.cssText)) {
+                out.push(rule.cssText);
+            } else if (rule instanceof CSSFontFaceRule && !UNSAFE_CSS_VALUE.test(rule.cssText)) {
                 out.push(rule.cssText);
             }
         }
@@ -966,6 +1007,17 @@ function scopeCss(css, scope) {
     walk(sheet.cssRules);
     return out.join('\n');
 }
+
+/** Web fonts the creator imports (Google Fonts and similar font services only). */
+function fontLinks(rawHtml, css) {
+    const urls = new Set();
+    for (const m of css.matchAll(/@import\s+(?:url\(\s*)?['"]?([^'")\s;]+)/gi)) urls.add(m[1]);
+    for (const m of rawHtml.matchAll(/<link[^>]+href=["']([^"']+)["']/gi)) urls.add(m[1].replace(/&amp;/g, '&'));
+    return [...urls].filter(u => FONT_HOSTS.test(u)).map(u => `<link rel="stylesheet" href="${esc(u)}" referrerpolicy="no-referrer">`).join('');
+}
+
+/** True when a Chub description is really an HTML page rather than markdown. */
+const looksLikeHtml = (text) => /<(style|html|body|head|section|header|table)\b/i.test(text) || /^\s*<(div|p|center|span|h\d)\b/i.test(text);
 
 let scopeCounter = 0;
 
@@ -976,17 +1028,17 @@ let scopeCounter = 0;
  */
 function richHtml(html, textOnly = false) {
     const raw = str(html);
-    const styleBlocks = textOnly ? [] : [...raw.matchAll(/<style[^>]*>([\s\S]*?)<\/style>/gi)].map(m => m[1]);
+    const css = textOnly ? '' : [...raw.matchAll(/<style[^>]*>([\s\S]*?)<\/style>/gi)].map(m => m[1]).join('\n');
     const clean = SillyTavern.libs.DOMPurify.sanitize(raw, {
-        FORBID_TAGS: ['style', 'form', 'input', 'button', 'iframe', 'textarea', 'select', 'video', 'audio', 'object', 'embed', 'svg', 'math', 'link', 'meta', 'base'],
-        FORBID_ATTR: ['id', 'srcset'],
+        FORBID_TAGS: ['style', 'form', 'input', 'button', 'iframe', 'textarea', 'select', 'video', 'object', 'embed', 'svg', 'math', 'link', 'meta', 'base', 'script'],
+        FORBID_ATTR: ['id', 'srcset', 'autoplay'],
     });
     const template = document.createElement('template');
     template.innerHTML = clean;
     template.content.querySelectorAll('[style]').forEach((el) => {
         const kept = textOnly
-            ? ['color', 'background-color', 'text-align', 'font-weight', 'font-style'].map(p => [p, el.style.getPropertyValue(p)]).filter(([, v]) => v).map(([p, v]) => `${p}:${v}`).join(';')
-            : safeDeclarations(el.style);
+            ? filterCss(el.getAttribute('style')).split(';').filter(d => /^(color|background-color|text-align|font-weight|font-style):/i.test(d)).join(';')
+            : filterCss(el.getAttribute('style'));
         if (kept) el.setAttribute('style', kept);
         else el.removeAttribute('style');
     });
@@ -1001,17 +1053,19 @@ function richHtml(html, textOnly = false) {
         img.referrerPolicy = 'no-referrer';
         img.loading = 'lazy';
     });
+    template.content.querySelectorAll('audio').forEach((audio) => {
+        if (textOnly) return audio.remove();
+        audio.controls = true;
+        audio.preload = 'none';
+    });
     if (textOnly) {
         template.content.querySelectorAll('hr, table, picture, figure').forEach(el => el.remove());
         return template.innerHTML;
     }
 
     const scope = `jai_scope_${++scopeCounter}`;
-    const css = styleBlocks
-        .map(block => scopeCss(block, `.${scope}`))
-        .filter(Boolean)
-        .join('\n');
-    return `<div class="jai_authored ${scope}">${css ? `<style>${css.replace(/<\/style/gi, '')}</style>` : ''}${template.innerHTML}</div>`;
+    const scoped = scopeCss(css, `.${scope}`);
+    return `<div class="jai_authored ${scope}">${fontLinks(raw, css)}${scoped ? `<style>${scoped.replace(/<\/style/gi, '')}</style>` : ''}${template.innerHTML}</div>`;
 }
 
 const verifiedBadge = (on) => (on ? ' <i class="fa-solid fa-circle-check jai_verified" title="Verified creator"></i>' : '');
@@ -1661,6 +1715,7 @@ function booksPanel(books) {
                     <span class="${cls}"><i class="fa-solid ${icon}"></i> ${label}${book.status === 'ok' && book.entries ? ` · ${book.entries} entries` : ''}</span>
                     ${book.meta ? `<span>${esc(book.meta)}</span>` : ''}
                 </div>
+                ${book.about ? `<div class="jai_book_about">${esc(book.about)}</div>` : ''}
             </div>`;
     }).join('');
     return `<div class="jai_section_title"><i class="fa-solid fa-book-atlas"></i> Lorebooks</div><div class="jai_books_grid">${rows}</div>`;
@@ -1688,6 +1743,7 @@ function janitorBooks(scripts, results = null) {
             status,
             entries: result?.entries?.length,
             meta: scriptMeta(script),
+            about: str(script.description),
         };
     });
 }
@@ -1914,59 +1970,66 @@ async function openDetail(id) {
     const published = detail.first_published_at || detail.created_at;
     const greetingCount = [detail.first_message, ...(Array.isArray(detail.first_messages) ? detail.first_messages : [])].map(str).filter(g => g.trim()).length;
 
+    const permanent = Number(tokens) - Number(counts.first_message_tokens || 0);
+    const tokenLine = `Character definition is ${defined ? 'visible' : 'hidden'}${tokens ? `, total ${compact(tokens)} tokens` : ''}${tokens && permanent > 0 ? `, permanent ${compact(permanent)}` : ''}`;
+
     box.innerHTML = `
-        <div class="jai_detail_side">
-            ${detail.avatar ? `<img referrerpolicy="no-referrer" src="${esc(avatarUrl(detail.avatar, 600))}" alt="">` : ''}
-            <div class="jai_btn jai_primary jai_import"><i class="fa-solid fa-file-import"></i><span>Import to SillyTavern</span></div>
-            ${scripts.shared.length ? '<div class="jai_btn jai_book_only" title="Save only the lorebook as a World Info file, without importing the character"><i class="fa-solid fa-book-atlas"></i><span>Lorebook only</span></div>' : ''}
-            <div class="jai_btn jai_back"><i class="fa-solid fa-arrow-left"></i><span>Back to list</span></div>
-            <a class="jai_btn" href="${SITE}/characters/${esc(detail.id)}" target="_blank" rel="noopener"><i class="fa-solid fa-up-right-from-square"></i><span>View on JanitorAI</span></a>
-            <div class="jai_btn jai_raw" title="Copy the raw data JanitorAI sent for this character (useful for bug reports)"><i class="fa-solid fa-copy"></i><span>Copy raw data</span></div>
-        </div>
-        <div class="jai_detail_main">
-            <h2 class="jai_detail_title">${esc(detail.name)}</h2>
-            <div class="jai_detail_by">
-                <span class="jai_creator_link" data-creator="${esc(detail.creator_id)}" data-name="${esc(detail.creator_name)}" title="Show all characters by this creator">@${esc(detail.creator_name)}${verifiedBadge(detail.creator_verified)}</span>
-                ${detail.chat_name ? `<span>chat name: <b>${esc(detail.chat_name)}</b></span>` : ''}
-            </div>
-            <div class="jai_statline">
-                <span title="Messages sent to this character"><i class="fa-regular fa-comments"></i> ${compact(detail.stats?.message)} messages</span>
-                <span title="Chats started"><i class="fa-regular fa-message"></i> ${compact(detail.stats?.chat)} chats</span>
-                ${tokens ? `<span title="${esc(breakdown || 'Permanent tokens')}"><i class="fa-solid fa-coins"></i> ${compact(tokens)} tokens</span>` : ''}
-                ${greetingCount ? `<span><i class="fa-regular fa-hand"></i> ${greetingCount} greeting${greetingCount > 1 ? 's' : ''}</span>` : ''}
-            </div>
-            <div class="jai_dates">
-                ${published ? `<span><i class="fa-regular fa-calendar-plus"></i> Created ${esc(fullDate(published))}</span>` : ''}
-                ${detail.updated_at ? `<span><i class="fa-regular fa-clock"></i> Updated ${esc(fullDate(detail.updated_at))} (${esc(timeAgo(detail.updated_at))})</span>` : ''}
-            </div>
-            ${breakdown ? `<div class="jai_breakdown">${esc(breakdown)}</div>` : ''}
-            <div class="jai_facts">
-                <span class="${defined ? 'jai_ok' : 'jai_bad'}"><i class="fa-solid ${defined ? 'fa-check' : 'fa-lock'}"></i> ${defined ? 'Definition available' : (signedIn() ? 'Definition hidden by the creator (greetings only)' : 'Definition needs a connected account')}</span>
-                <span class="jai_bookfact ${scripts.shared.length ? '' : (scripts.private.length ? 'jai_bad' : '')}" title="${esc(scriptNames)}"><i class="fa-solid fa-book-atlas"></i> ${scripts.shared.length ? '<i class="fa-solid fa-spinner fa-spin"></i> Checking lorebooks…' : esc(bookFact)}</span>
-                ${signedIn() ? '' : '<span class="jai_link" data-jai-connect><i class="fa-solid fa-key"></i> Connect account</span>'}
-            </div>
-            ${!defined && signedIn() ? `
-            <div class="jai_outside">
-                <b>Definition hidden on JanitorAI.</b> JannyAI may have its own copy (possibly older). If it does, it can be combined with the greetings, avatar and lorebook from here:
-                <div class="jai_actions">
-                    <div class="jai_btn jai_janny_auto"><i class="fa-solid fa-wand-magic-sparkles"></i><span>Try to fetch it</span></div>
-                    <a class="jai_btn" href="${JANNY}${esc(detail.id)}" target="_blank" rel="noopener"><i class="fa-solid fa-up-right-from-square"></i><span>Open on JannyAI</span></a>
-                    <div class="jai_btn jai_janny_file"><i class="fa-solid fa-file-arrow-up"></i><span>Use downloaded card…</span></div>
+        <div class="jai_jdetail">
+            <div class="jai_jleft">
+                <div class="jai_jcard">
+                    <h2 class="jai_detail_title">${esc(detail.name)}</h2>
+                    <div class="jai_jimage">
+                        ${detail.avatar ? `<img referrerpolicy="no-referrer" src="${esc(avatarUrl(detail.avatar, 900))}" alt="">` : ''}
+                        <span class="jai_stats" title="Chats · messages"><i class="fa-regular fa-message"></i> ${compact(detail.stats?.chat)} <i class="fa-regular fa-comments"></i> ${compact(detail.stats?.message)}</span>
+                    </div>
+                    <div class="jai_jby">
+                        <span class="jai_byline">by: <span class="jai_creator_link" data-creator="${esc(detail.creator_id)}" data-name="${esc(detail.creator_name)}" title="Show all characters by this creator">@${esc(detail.creator_name)}${verifiedBadge(detail.creator_verified)}</span></span>
+                        ${detail.chat_name ? `<span class="jai_dim">chat name: <b>${esc(detail.chat_name)}</b></span>` : ''}
+                        ${greetingCount ? `<span class="jai_dim"><i class="fa-regular fa-hand"></i> ${greetingCount} greeting${greetingCount > 1 ? 's' : ''}</span>` : ''}
+                    </div>
+                    <div class="jai_tags">${tagChips(detail)}</div>
+                    <div class="jai_description jai_rich">${richHtml(detail.description)}</div>
                 </div>
-                <input type="file" class="jai_janny_input" accept=".png,.json,image/png,application/json" hidden>
-                <div class="jai_note jai_janny_note">If fetching fails: open the JannyAI page, download the card there, then pick that file with "Use downloaded card".</div>
-            </div>` : ''}
-            <div class="jai_tags">${tagChips(detail)}</div>
-            <div class="jai_books">${booksPanel(janitorBooks(scripts, signedIn() ? null : new Map()))}</div>
-            <div class="jai_description jai_rich">${richHtml(detail.description)}</div>
-            ${definitionPanel([
+            </div>
+            <div class="jai_jright">
+                <div class="jai_jactions">
+                    <div class="jai_btn jai_primary jai_import"><i class="fa-solid fa-file-import"></i><span>Import to SillyTavern</span></div>
+                    ${scripts.shared.length ? '<div class="jai_btn jai_book_only" title="Save only the lorebook as a World Info file, without importing the character"><i class="fa-solid fa-book-atlas"></i><span>Lorebook only</span></div>' : ''}
+                    <a class="jai_btn" href="${SITE}/characters/${esc(detail.id)}" target="_blank" rel="noopener" title="View on JanitorAI"><i class="fa-solid fa-up-right-from-square"></i><span>JanitorAI</span></a>
+                    <div class="jai_btn jai_raw" title="Copy the raw data JanitorAI sent for this character (useful for bug reports)"><i class="fa-solid fa-copy"></i></div>
+                    <div class="jai_btn jai_back" title="Back to the list"><i class="fa-solid fa-arrow-left"></i><span>Back</span></div>
+                </div>
+                <div class="jai_dates">
+                    ${published ? `<span><i class="fa-regular fa-calendar-plus"></i> Created ${esc(fullDate(published))}</span>` : ''}
+                    ${detail.updated_at ? `<span><i class="fa-regular fa-clock"></i> Updated ${esc(fullDate(detail.updated_at))} (${esc(timeAgo(detail.updated_at))})</span>` : ''}
+                </div>
+                <div class="jai_facts">
+                    <span class="${defined ? 'jai_ok' : 'jai_bad'}"><i class="fa-solid ${defined ? 'fa-check' : 'fa-lock'}"></i> ${defined ? 'Definition available' : (signedIn() ? 'Definition hidden by the creator (greetings only)' : 'Definition needs a connected account')}</span>
+                    <span class="jai_bookfact ${scripts.shared.length ? '' : (scripts.private.length ? 'jai_bad' : '')}" title="${esc(scriptNames)}"><i class="fa-solid fa-book-atlas"></i> ${scripts.shared.length ? '<i class="fa-solid fa-spinner fa-spin"></i> Checking lorebooks…' : esc(bookFact)}</span>
+                    ${signedIn() ? '' : '<span class="jai_link" data-jai-connect><i class="fa-solid fa-key"></i> Connect account</span>'}
+                </div>
+                ${!defined && signedIn() ? `
+                <div class="jai_outside">
+                    <b>Definition hidden on JanitorAI.</b> JannyAI may have its own copy (possibly older). If it does, it can be combined with the greetings, avatar and lorebook from here:
+                    <div class="jai_actions">
+                        <div class="jai_btn jai_janny_auto"><i class="fa-solid fa-wand-magic-sparkles"></i><span>Try to fetch it</span></div>
+                        <a class="jai_btn" href="${JANNY}${esc(detail.id)}" target="_blank" rel="noopener"><i class="fa-solid fa-up-right-from-square"></i><span>Open on JannyAI</span></a>
+                        <div class="jai_btn jai_janny_file"><i class="fa-solid fa-file-arrow-up"></i><span>Use downloaded card…</span></div>
+                    </div>
+                    <input type="file" class="jai_janny_input" accept=".png,.json,image/png,application/json" hidden>
+                    <div class="jai_note jai_janny_note">If fetching fails: open the JannyAI page, download the card there, then pick that file with "Use downloaded card".</div>
+                </div>` : ''}
+                <div class="jai_books">${booksPanel(janitorBooks(scripts, signedIn() ? null : new Map()))}</div>
+                <div class="jai_tokenline" title="${esc(breakdown)}">${esc(tokenLine)}</div>
+                ${definitionPanel([
         ['Personality', detail.personality],
         ['Scenario', detail.scenario],
         ['First message', detail.first_message],
         ...(Array.isArray(detail.first_messages) ? detail.first_messages : []).map(str).filter(g => g.trim() && g !== detail.first_message).map((g, i) => [`Greeting ${i + 2}`, g]),
         ['Example dialogue', detail.example_dialogs],
     ])}
-            ${commentsPanel(`${SITE}/characters/${detail.id}`, 'JanitorAI')}
+                ${commentsPanel(`${SITE}/characters/${detail.id}`, 'JanitorAI')}
+            </div>
         </div>`;
 
     box.querySelector('[data-jai-connect]')?.addEventListener('click', () => showConnect());
@@ -2142,7 +2205,7 @@ async function openChubDetail(fullPath) {
             </div>
             <div class="jai_tags">${topicChips(node.topics)}</div>
             <div class="jai_books">${booksPanel(chubBooks(node))}</div>
-            <div class="jai_description jai_rich">${description ? richHtml(markdownToHtml(description)) : '<i>No description.</i>'}</div>
+            <div class="jai_description jai_rich">${description ? richHtml(looksLikeHtml(description) ? description : markdownToHtml(description)) : '<i>No description.</i>'}</div>
             ${isLorebook ? '' : definitionPanel([
         ['Personality', def.personality],
         ['Scenario', def.scenario],

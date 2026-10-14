@@ -1193,3 +1193,171 @@
 #jai_browser.jai_theme_chub .jai_card .jai_tags::-webkit-scrollbar-track {
     background: transparent;
 }
+
+/* ---------- creator styling stays in its box ---------- */
+
+#jai_browser .jai_authored {
+    isolation: isolate;
+    z-index: 0;
+}
+
+#jai_browser .jai_book_about {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    margin-top: 6px;
+    font-size: 12px;
+    color: var(--jai-dim);
+}
+
+/* ---------- JanitorAI grid: even rows like janitorai.com ---------- */
+
+#jai_browser:not(.jai_theme_chub) .jai_grid {
+    align-items: stretch;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+}
+
+#jai_browser:not(.jai_theme_chub) .jai_card .jai_blurb {
+    height: 128px;
+}
+
+#jai_browser:not(.jai_theme_chub) .jai_card .jai_tags {
+    height: 86px;
+    align-content: flex-start;
+}
+
+#jai_browser:not(.jai_theme_chub) .jai_card_body {
+    min-height: 162px;
+}
+
+/* ---------- JanitorAI character page: two columns like janitorai.com ---------- */
+
+#jai_browser .jai_jdetail {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 22px;
+    width: 100%;
+    align-items: start;
+}
+
+#jai_browser .jai_jcard {
+    padding: 14px;
+    border: 1px solid #6d3fd1;
+    border-radius: 10px;
+    background: linear-gradient(180deg, #2a0f57 0, #1a0a3b 260px, #130829 100%);
+    box-shadow: 0 0 0 1px rgba(246, 122, 243, 0.08), 0 10px 40px rgba(60, 20, 140, 0.35);
+}
+
+#jai_browser .jai_jcard .jai_detail_title {
+    margin: 0 0 10px;
+    font-size: 30px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+}
+
+#jai_browser .jai_jimage {
+    position: relative;
+    border: 1px solid rgba(158, 133, 255, 0.35);
+    border-radius: 8px;
+    overflow: hidden;
+    background: #0c0618;
+}
+
+#jai_browser .jai_jimage img {
+    display: block;
+    width: 100%;
+    max-height: 520px;
+    object-fit: contain;
+}
+
+#jai_browser .jai_jimage .jai_stats {
+    top: 10px;
+}
+
+#jai_browser .jai_jby {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 14px;
+    margin: 12px 0 10px;
+    font-size: 13px;
+}
+
+#jai_browser .jai_byline {
+    padding: 5px 10px;
+    border: 2px solid #b8862b;
+    border-radius: 8px;
+    background: rgba(0, 0, 0, 0.35);
+    color: var(--jai-dim);
+    font-size: 14px;
+}
+
+#jai_browser .jai_byline .jai_creator_link {
+    font-size: 14px;
+}
+
+#jai_browser .jai_jcard > .jai_tags {
+    margin-bottom: 12px;
+}
+
+#jai_browser .jai_jcard .jai_description {
+    padding: 12px;
+    border: 0;
+    border-radius: 8px;
+    background: rgba(0, 0, 0, 0.25);
+    color: var(--jai-text);
+}
+
+#jai_browser .jai_jright {
+    min-width: 0;
+}
+
+#jai_browser .jai_jactions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+#jai_browser .jai_jactions .jai_primary {
+    flex: 1 1 200px;
+}
+
+#jai_browser .jai_jright .jai_dates {
+    margin-top: 12px;
+}
+
+#jai_browser:not(.jai_theme_chub) .jai_jright .jai_book {
+    border-color: #7c4ddf;
+    background: rgba(34, 18, 70, 0.55);
+}
+
+#jai_browser:not(.jai_theme_chub) .jai_jright .jai_book.jai_book_ok {
+    border-color: #a78bfa;
+    box-shadow: 0 0 0 1px rgba(167, 139, 250, 0.25);
+}
+
+#jai_browser:not(.jai_theme_chub) .jai_jright .jai_kind {
+    background: rgba(124, 77, 223, 0.25);
+    color: #c4b5fd;
+}
+
+#jai_browser .jai_tokenline {
+    display: inline-block;
+    margin-top: 14px;
+    padding: 4px 12px;
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.06);
+    font-family: var(--jai-title-font);
+    font-size: 14px;
+    letter-spacing: 0.4px;
+    color: var(--jai-dim);
+}
+
+@media (max-width: 900px) {
+    #jai_browser .jai_jdetail {
+        grid-template-columns: minmax(0, 1fr);
+    }
+}
