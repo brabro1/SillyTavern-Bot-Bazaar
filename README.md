@@ -1,36 +1,43 @@
-# Janitor Importer
+# Bot Bazaar
 
-A SillyTavern extension to browse JanitorAI characters and import them — definition, greetings, tags,
-avatar **and the attached lorebook** — without leaving SillyTavern. Works on desktop and on phones.
+An all-in-one SillyTavern extension to browse **JanitorAI** and **Chub** and import characters —
+definition, greetings, tags, avatar **and their lorebooks** — or lorebooks on their own, without
+leaving SillyTavern. Works on desktop and on phones.
 
 ## Install
 
 In SillyTavern open **Extensions → Install extension** and paste:
 
 ```
-https://github.com/brabro1/SillyTavern-Janitor-Importer
+https://github.com/brabro1/SillyTavern-Bot-Bazaar
 ```
 
 ## Use
 
-Click the broom button next to "Import content from external URL" in the character panel
-(or **Janitor Importer** in the Extensions wand menu).
+Open it with the store button next to "Import content from external URL" in the character panel
+(or **Bot Bazaar** in the Extensions wand menu), then pick **JanitorAI** or **Chub** at the top.
 
-- Without an account you can look at the first page of Popular / Trending / Latest.
-- Search, more pages, character definitions and lorebooks need your JanitorAI login — press **Account**.
-- Open a character and press **Import to SillyTavern**. A shared lorebook becomes a World Info file
-  that is linked to the character.
-- Click a creator's **@name** to see their profile and all their characters; click any tag to filter by it.
-- Cards show messages, public chats, tokens and when the character was last updated; the character
-  page adds created/updated dates and the creator's own coloured description.
-- You can also paste a `janitorai.com/characters/...` or `janitorai.com/profiles/...` link into the search box.
-- **Lorebook only** saves just the lorebook as a World Info file — handy when you already have the
-  character card from somewhere else and only miss its lorebook.
+- Browse by Trending / Popular / Latest (Chub also has Top rated, Newest, Updated), search,
+  switch between All and Limited only, and page through results.
+- Click a creator's **@name** to see their profile and everything they published; click any tag to filter by it.
+- Open a card for the full page: stats, created/updated dates, token counts and the creator's own
+  (coloured) description.
+- **Import to SillyTavern** creates the character. Its lorebooks become one World Info file that is
+  linked to the character.
+- **Lorebook only** saves just the lorebook — handy when you already have the card from elsewhere.
+- On Chub you can also browse **Lorebooks** and import them directly.
+- Paste a `janitorai.com/characters/…`, `janitorai.com/profiles/…`, `chub.ai/characters/…` or
+  `chub.ai/lorebooks/…` link into the search box to jump straight to it.
 
-## Connecting your account
+## Chub
 
-JanitorAI's sign-in (captcha, Google/Discord/Apple) only works on its own site, so the extension cannot
-show a login form. Instead you carry your login over with a small bookmark:
+Needs nothing — Chub's API is public. Linked lorebooks are merged with the card's own lorebook.
+
+## JanitorAI: connecting your account
+
+Without an account JanitorAI only shows the first page of results and no definitions or lorebooks.
+JanitorAI's sign-in (captcha, Google/Discord/Apple) only works on its own site, so you carry your
+login over with a small bookmark:
 
 1. One-time: add the **Janitor token** bookmark shown in the Account panel
    (computer: drag it to the bookmarks bar; phone: copy the code and save it as a bookmark named `jtoken`).
@@ -43,17 +50,14 @@ Desktop alternative with nothing to copy: install [Tampermonkey](https://www.tam
 switch on **Allow User Scripts** for it, and install `janitor-bridge.user.js` from this repository.
 The extension then works through your open JanitorAI tab.
 
-## Good to know
+The token is your JanitorAI login. It is stored in your SillyTavern settings and only sent to
+janitorai.com — never share it, and remember it is inside settings backups.
 
-- Everything runs in your browser; requests go straight to janitorai.com and nowhere else.
-- The token is your JanitorAI login. It is stored in your SillyTavern settings — never share it,
-  and remember it is inside settings backups.
-- Creators can hide a character's definition and keep a lorebook private. JanitorAI does not send those,
-  and this extension does not (and will not) try to get around that. Such characters import with their
-  public parts only: name, avatar, description, tags and greetings.
-- JanitorAI "advanced" (code) scripts cannot be converted and are skipped.
+## Hidden definitions, private lorebooks and JannyAI
 
-## Hidden definitions and JannyAI
+JanitorAI creators can hide a character's definition and keep lorebook contents private.
+JanitorAI does not send those, and this extension does not (and will not) try to get around that.
+Such characters import with their public parts: name, avatar, description, tags and greetings.
 
 When a definition is hidden, the character page offers to use **JannyAI's copy** of the card instead
 (JannyAI is a separate site that publishes its own, possibly older, copies):
@@ -63,10 +67,13 @@ When a definition is hidden, the character page offers to use **JannyAI's copy**
 - Otherwise press **Open on JannyAI**, download the card there yourself, and hand the file to the
   extension with **Use downloaded card**.
 
-The extension then imports one character: definition from the JannyAI copy, greetings, avatar, tags
-and lorebook from JanitorAI. If JannyAI has no copy, there is nothing to add.
+The extension then imports one character: definition from the JannyAI copy, everything else from JanitorAI.
 
-This project is not affiliated with JanitorAI or SillyTavern. Respect creators' work.
+JanitorAI "advanced" (code) scripts cannot be converted and are skipped.
+
+---
+
+This project is not affiliated with JanitorAI, Chub, JannyAI or SillyTavern. Respect creators' work.
 
 ## License
 

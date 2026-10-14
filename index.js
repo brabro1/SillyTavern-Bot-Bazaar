@@ -1,20 +1,19 @@
 /*
- * Janitor Importer — SillyTavern extension
+ * Bot Bazaar — SillyTavern extension
  *
- *  • Browse / search JanitorAI characters from inside SillyTavern.
- *  • Import a character with its full definition, greetings, tags, avatar and attached lorebook(s).
+ *  • Browse and search JanitorAI and Chub from inside SillyTavern.
+ *  • Import characters with their full definition, greetings, tags, avatar and lorebooks, or import lorebooks alone.
  *
- * Everything runs in the browser: the extension calls JanitorAI's own API directly. Anonymous visitors only get
- * the first page of results and no definitions, so the user can connect their account by pasting a login token
- * (stored in the extension settings, sent only to janitorai.com). Definitions the creator has hidden stay hidden.
- *
- * Optional: if the "Janitor Importer bridge" userscript (janitor-bridge.user.js) is installed, requests are relayed
- * through the user's logged-in JanitorAI tab instead and no token is needed.
+ * Everything runs in the browser.
+ *  - Chub's API is public, so it needs nothing.
+ *  - JanitorAI only gives definitions and lorebooks to a signed-in account, so the user connects their account by
+ *    pasting a login token (stored in the extension settings, sent only to janitorai.com), or installs the optional
+ *    helper userscript (janitor-bridge.user.js). Definitions and lorebooks the creator keeps private stay private.
  */
 
 import { processDroppedFiles } from '../../../../script.js';
 
-const TAG = '[Janitor Importer]';
+const TAG = '[Bot Bazaar]';
 const SITE = 'https://janitorai.com';
 const AVATARS = 'https://ella.janitorai.com/bot-avatars/';
 const USERSCRIPT_URL = new URL('janitor-bridge.user.js', import.meta.url).href;
@@ -242,7 +241,8 @@ function convertEntry(entry, index, defaults = {}) {
     const enabled = entry.enabled !== undefined ? !!entry.enabled : (entry.disable !== undefined ? !entry.disable : (entry.disabled !== undefined ? !entry.disabled : true));
     const constant = !!firstDefined(entry.constant, entry.always_on, entry.alwaysOn, entry.always_active, entry.alwaysActive, keys.length === 0);
     const order = Number(firstDefined(entry.insertion_order, entry.order, entry.priority, 100));
-    const before = entry.position === 'before_char' || entry.position === 0 || entry.position === 'before' || entry.placementPosition === 'before';
+    const numericPosition = typeof entry.position === 'number' || /^\d+$/.test(str(entry.position)) ? Number(entry.position) : null;
+    const before = entry.position === 'before_char' || numericPosition === 0 || entry.position === 'before' || entry.placementPosition === 'before';
     const probability = Number(firstDefined(entry.probability, entry.extensions?.probability, 100));
     const caseSensitive = firstDefined(entry.case_sensitive, entry.caseSensitive, entry.extensions?.case_sensitive);
     const wholeWords = firstDefined(entry.matchWholeWords, entry.match_whole_words, entry.extensions?.match_whole_words);
@@ -251,7 +251,7 @@ function convertEntry(entry, index, defaults = {}) {
     const group = str(firstDefined(entry.inclusionGroupRaw, entry.group)).trim();
 
     const extensions = { ...(entry.extensions && typeof entry.extensions === 'object' ? entry.extensions : {}) };
-    extensions.position = typeof entry.position === 'number' ? entry.position : (before ? 0 : 1);
+    extensions.position = numericPosition ?? (before ? 0 : 1);
     extensions.probability = Number.isFinite(probability) ? probability : 100;
     extensions.useProbability = true;
     if (typeof caseSensitive === 'boolean') extensions.case_sensitive = caseSensitive;
@@ -389,7 +389,9 @@ async function buildLorebook(detail, bookName) {
 }
 
 const cleanTag = (name) => str(name).replace(/^[^\p{L}\p{N}#]+/u, '').trim();
-const safeName = (name) => str(name).replace(/[\\/:*?"<>|\u0000-\u001f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 80);
+const safeName = (name) => str(name)
+    .replace(/\{\{(\w+)\}\}/g, (_, macro) => macro.charAt(0).toUpperCase() + macro.slice(1))
+    .replace(/[\\/:*?"<>|\u0000-\u001f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 80);
 // Greetings stay visible even when the creator hides the definition, so they don't count.
 const hasDefinition = (d) => !!(str(d.personality).trim() || str(d.scenario).trim() || str(d.example_dialogs).trim());
 
@@ -483,11 +485,11 @@ function embedCard(png, card) {
     return out;
 }
 
-async function avatarPng(detail, displayName) {
+async function avatarPng(imageUrl, displayName) {
     let bitmap = null;
-    if (detail.avatar) {
+    if (imageUrl) {
         try {
-            const blob = await fetchImage(`${AVATARS}${encodeURIComponent(detail.avatar)}`);
+            const blob = await fetchImage(imageUrl);
             if (blob) bitmap = await createImageBitmap(blob);
         } catch (error) {
             console.warn(TAG, 'Avatar download failed', error);
@@ -594,8 +596,28 @@ function sameCharacter(detail, data) {
 
 // ---------------------------------------------------------------------------------------------- import
 
+/** Saves the lorebook (if any), builds the PNG card and hands it to SillyTavern's normal importer. */
+async function finishImport(card, book, imageUrl, name, warnings = []) {
+    const { saveWorldInfo, convertCharacterBook, updateWorldInfoList, getWorldInfoNames } = ctx();
+    if (book) {
+        // Create the world file first so the link in the card resolves as soon as the character appears.
+        const replacing = getWorldInfoNames().includes(book.name);
+        await saveWorldInfo(book.name, convertCharacterBook(structuredClone(book)), true);
+        await updateWorldInfoList();
+        console.info(TAG, `${replacing ? 'Replaced' : 'Created'} lorebook "${book.name}" with ${book.entries.length} entries`);
+    }
+
+    const avatar = await avatarPng(imageUrl, name);
+    const file = new File([embedCard(avatar.bytes, card)], `${name}.png`, { type: 'image/png' });
+    await processDroppedFiles([file]);
+
+    if (book) toastr.success(`${book.entries.length} lorebook entries imported and linked.`, 'Bot Bazaar');
+    warnings.forEach(w => toastr.warning(w, 'Bot Bazaar', { timeOut: 12000 }));
+    if (avatar.placeholder) toastr.info('The avatar could not be downloaded, a placeholder was used.', 'Bot Bazaar');
+}
+
 async function importCharacter(detail) {
-    const { Popup, saveWorldInfo, convertCharacterBook, updateWorldInfoList, getWorldInfoNames } = ctx();
+    const { Popup } = ctx();
     const name = safeName(detail.chat_name) || safeName(detail.name) || 'Janitor character';
 
     if (!hasDefinition(detail)) {
@@ -609,24 +631,10 @@ async function importCharacter(detail) {
     }
 
     const bookName = `${name} (Janitor Lorebook)`;
-    const { book, warnings, scriptCount } = await buildLorebook(detail, bookName);
+    const { book, warnings } = await buildLorebook(detail, bookName);
     const card = buildCard(detail, book);
 
-    if (book) {
-        // Create the world file first so the link in the card resolves as soon as the character appears.
-        const replacing = getWorldInfoNames().includes(bookName);
-        await saveWorldInfo(bookName, convertCharacterBook(structuredClone(book)), true);
-        await updateWorldInfoList();
-        console.info(TAG, `${replacing ? 'Replaced' : 'Created'} lorebook "${bookName}" with ${book.entries.length} entries`);
-    }
-
-    const avatar = await avatarPng(detail, name);
-    const file = new File([embedCard(avatar.bytes, card)], `${name}.png`, { type: 'image/png' });
-    await processDroppedFiles([file]);
-
-    if (book) toastr.success(`${book.entries.length} lorebook entries imported and linked.`, 'Janitor Importer');
-    warnings.forEach(w => toastr.warning(w, 'Janitor Importer', { timeOut: 10000 }));
-    if (avatar.placeholder) toastr.info('The avatar could not be downloaded, a placeholder was used.', 'Janitor Importer');
+    await finishImport(card, book, detail.avatar ? `${AVATARS}${encodeURIComponent(detail.avatar)}` : '', name, warnings);
     return true;
 }
 
@@ -636,20 +644,232 @@ async function importLorebookOnly(detail) {
     const name = safeName(detail.chat_name) || safeName(detail.name) || 'Janitor character';
     const bookName = `${name} (Janitor Lorebook)`;
     const { book, warnings } = await buildLorebook(detail, bookName);
-    warnings.forEach(w => toastr.warning(w, 'Janitor Importer', { timeOut: 12000 }));
-    if (!book) return toastr.info('No lorebook entries could be imported for this character.', 'Janitor Importer');
+    warnings.forEach(w => toastr.warning(w, 'Bot Bazaar', { timeOut: 12000 }));
+    if (!book) return toastr.info('No lorebook entries could be imported for this character.', 'Bot Bazaar');
 
     await saveWorldInfo(bookName, convertCharacterBook(structuredClone(book)), true);
     await updateWorldInfoList();
-    toastr.success(`"${bookName}" saved with ${book.entries.length} entries. To attach it, open a character and pick it with the globe button.`, 'Janitor Importer', { timeOut: 12000 });
+    toastr.success(`"${bookName}" saved with ${book.entries.length} entries. To attach it, open a character and pick it with the globe button.`, 'Bot Bazaar', { timeOut: 12000 });
+}
+
+// ---------------------------------------------------------------------------------------------- Chub
+
+const CHUB_API = 'https://gateway.chub.ai';
+const CHUB_SITE = 'https://chub.ai';
+const CHUB_PAGE_SIZE = 24;
+
+/** Chub's API is public and allows browser requests, so no account or helper is needed. */
+async function chubGet(url) {
+    let response;
+    try {
+        response = await fetch(url, { credentials: 'omit', referrerPolicy: 'no-referrer' });
+    } catch {
+        throw new ApiError('network', 'Could not reach Chub from this browser. Check that chub.ai opens in a normal tab on this device.');
+    }
+    if (!response.ok) {
+        const error = new ApiError('http', `Chub answered with an error (${response.status}).`);
+        error.status = response.status;
+        throw error;
+    }
+    return response.json();
+}
+
+const chubRawLorebookUrl = (id) => `https://api.chub.ai/api/v4/projects/${encodeURIComponent(id)}/repository/files/raw%252Fsillytavern_raw.json/raw`;
+
+/** "user/slug" for characters, "lorebooks/user/id" for lorebooks. */
+function chubParts(fullPath) {
+    const parts = str(fullPath).split('/');
+    const isLorebook = parts[0] === 'lorebooks';
+    return { isLorebook, creator: isLorebook ? parts[1] : parts[0] };
+}
+
+const chubPageUrl = (fullPath) => `${CHUB_SITE}/${chubParts(fullPath).isLorebook ? '' : 'characters/'}${fullPath}`;
+
+function markdownToHtml(markdown) {
+    try {
+        const converter = new SillyTavern.libs.showdown.Converter({ simpleLineBreaks: true, strikethrough: true, tables: true, openLinksInNewWindow: true });
+        return converter.makeHtml(str(markdown));
+    } catch {
+        return esc(markdown).replace(/\n/g, '<br>');
+    }
+}
+
+function topicChips(topics) {
+    return (Array.isArray(topics) ? topics : [])
+        .map(topic => `<span class="jai_chip" data-topic="${esc(topic)}" title="Show more with this tag">${esc(topic)}</span>`)
+        .join('');
+}
+
+/** Turns a Chub search result into the shared card model. */
+function chubModel(node) {
+    const { isLorebook, creator } = chubParts(node.fullPath);
+    return {
+        source: 'chub',
+        id: node.fullPath,
+        kind: isLorebook ? 'lorebook' : 'character',
+        name: node.name,
+        image: node.avatar_url || '',
+        creatorId: creator,
+        creatorName: creator,
+        verified: !!node.verified,
+        blurb: esc(str(node.tagline).trim() || str(node.description).trim().slice(0, 300)),
+        stats: `<i class="fa-solid fa-star"></i> ${compact(node.starCount)} <i class="fa-solid fa-heart"></i> ${compact(node.n_favorites)}`,
+        statsTitle: `${compact(node.starCount)} stars · ${compact(node.n_favorites)} favorites · ${compact(node.nChats)} chats`,
+        chips: topicChips(node.topics),
+        tokens: node.nTokens,
+        updated: node.lastActivityAt || node.createdAt,
+    };
+}
+
+async function chubList() {
+    const query = new URLSearchParams({
+        first: CHUB_PAGE_SIZE,
+        page: state.page,
+        namespace: state.kind,
+        nsfw: state.mode !== 'sfw',
+        nsfl: false,
+        include_forks: true,
+        sort: state.sort,
+        asc: false,
+    });
+    if (state.search) query.set('search', state.search);
+    if (state.topic) query.set('topics', state.topic);
+    if (state.creator) query.set('username', state.creator.id);
+    const result = await chubGet(`${CHUB_API}/search?${query}`);
+    const nodes = Array.isArray(result?.data?.nodes) ? result.data.nodes : [];
+    return { items: nodes.map(chubModel), total: Number(result?.data?.count) || nodes.length, size: CHUB_PAGE_SIZE };
+}
+
+async function chubDetail(fullPath) {
+    const { isLorebook } = chubParts(fullPath);
+    const result = await chubGet(`${CHUB_API}/api/${isLorebook ? '' : 'characters/'}${fullPath}?full=true`);
+    if (!result?.node) throw new ApiError('http', 'Chub did not return this page.');
+    return result.node;
+}
+
+const relatedLorebooks = (node) => [...new Set([
+    ...(Array.isArray(node.related_lorebooks) ? node.related_lorebooks : []),
+    ...(Array.isArray(node.definition?.extensions?.chub?.related_lorebooks) ? node.definition.extensions.chub.related_lorebooks : []),
+])].filter(id => Number(id) > 0);
+
+/** Embedded lorebook + every linked lorebook of a Chub character, merged into one V2 character_book. */
+async function chubBook(node, bookName) {
+    const warnings = [];
+    const entries = [];
+    const embedded = node.definition?.embedded_lorebook;
+    if (Array.isArray(embedded?.entries)) embedded.entries.forEach(entry => entries.push(convertEntry(entry, entries.length)));
+
+    for (const id of relatedLorebooks(node)) {
+        try {
+            const world = await chubGet(chubRawLorebookUrl(id));
+            const list = Array.isArray(world?.entries) ? world.entries : Object.values(world?.entries || {});
+            list.filter(e => e && typeof e === 'object').forEach(entry => entries.push(convertEntry(entry, entries.length)));
+        } catch (error) {
+            console.warn(TAG, 'Linked Chub lorebook failed', id, error);
+            warnings.push(`A linked lorebook (#${id}) could not be downloaded from Chub.`);
+        }
+    }
+
+    if (!entries.length) return { book: null, warnings };
+    return { book: { name: bookName, description: `Imported from Chub (${node.fullPath})`, extensions: {}, entries }, warnings };
+}
+
+function buildChubCard(node, book) {
+    const def = node.definition || {};
+    const { creator } = chubParts(node.fullPath);
+    const extensions = def.extensions && typeof def.extensions === 'object' ? structuredClone(def.extensions) : {};
+    return {
+        spec: 'chara_card_v2',
+        spec_version: '2.0',
+        data: {
+            name: safeName(def.name || node.name) || 'Chub character',
+            description: str(def.personality),
+            personality: str(def.tavern_personality),
+            scenario: str(def.scenario),
+            first_mes: str(def.first_message),
+            mes_example: str(def.example_dialogs),
+            creator_notes: str(def.description),
+            system_prompt: str(def.system_prompt),
+            post_history_instructions: str(def.post_history_instructions),
+            alternate_greetings: (Array.isArray(def.alternate_greetings) ? def.alternate_greetings : []).map(str).filter(g => g.trim()),
+            tags: Array.isArray(node.topics) ? node.topics : [],
+            creator,
+            character_version: '',
+            extensions: {
+                talkativeness: '0.5',
+                fav: false,
+                depth_prompt: { prompt: '', depth: 4, role: 'system' },
+                ...extensions,
+                world: book ? book.name : '',
+                chub: { ...(extensions.chub || {}), full_path: node.fullPath, id: node.id, source: chubPageUrl(node.fullPath) },
+            },
+            ...(book ? { character_book: book } : {}),
+        },
+    };
+}
+
+async function importChubCharacter(node) {
+    const name = safeName(node.definition?.name || node.name) || 'Chub character';
+    const { book, warnings } = await chubBook(node, `${name} (Chub Lorebook)`);
+    const card = buildChubCard(node, book);
+    await finishImport(card, book, node.max_res_url || node.avatar_url || '', name, warnings);
+    return true;
+}
+
+/** Saves a Chub lorebook as a World Info file. Returns the number of entries. */
+async function importChubLorebook(node, bookName = safeName(node.name) || 'Chub lorebook') {
+    const { saveWorldInfo, convertCharacterBook, updateWorldInfoList } = ctx();
+    const embedded = node.definition?.embedded_lorebook;
+    let world = null;
+    if (Array.isArray(embedded?.entries) && embedded.entries.length) {
+        world = convertCharacterBook(structuredClone({ ...embedded, entries: embedded.entries.map((e, i) => convertEntry(e, i)) }));
+    } else {
+        const raw = await chubGet(chubRawLorebookUrl(node.id));
+        if (raw?.entries && Object.keys(raw.entries).length) world = raw;
+    }
+    if (!world) throw new Error('This lorebook has no entries.');
+
+    await saveWorldInfo(bookName, world, true);
+    await updateWorldInfoList();
+    const count = Object.keys(world.entries || {}).length;
+    toastr.success(`"${bookName}" saved with ${count} entries. To attach it, open a character and pick it with the globe button.`, 'Bot Bazaar', { timeOut: 12000 });
+    return count;
 }
 
 // ---------------------------------------------------------------------------------------------- UI
 
-const state = {
-    page: 1, sort: 'popular', mode: 'all', search: '', tag: '', customTag: '', creator: null,
-    total: 0, size: 0, loading: false, tagsLoaded: false, detail: null,
+const SORTS = {
+    janitor: [
+        ['trending', 'fa-fire', 'Trending'],
+        ['popular', 'fa-star', 'Popular'],
+        ['latest', 'fa-clock', 'Latest'],
+        ['relevance', 'fa-bullseye', 'Best match'],
+    ],
+    chub: [
+        ['trending_downloads', 'fa-fire', 'Trending'],
+        ['download_count', 'fa-download', 'Popular'],
+        ['star_count', 'fa-star', 'Top rated'],
+        ['created_at', 'fa-clock', 'Newest'],
+        ['last_activity_at', 'fa-rotate', 'Updated'],
+        ['default', 'fa-bullseye', 'Best match'],
+    ],
 };
+const DEFAULT_SORT = { janitor: 'popular', chub: 'trending_downloads' };
+const CREATOR_SORT = { janitor: 'latest', chub: 'created_at' };
+const SEARCH_SORT = { janitor: 'relevance', chub: 'default' };
+const SOURCE_KEY = 'botBazaar.source';
+
+const state = {
+    source: 'janitor', kind: 'characters',
+    page: 1, sort: 'popular', mode: 'all', search: '', tag: '', customTag: '', topic: '', creator: null,
+    total: 0, size: 0, loading: false, tagsLoaded: false, detail: null, detailSource: null,
+};
+try {
+    if (localStorage.getItem(SOURCE_KEY) === 'chub') {
+        state.source = 'chub';
+        state.sort = DEFAULT_SORT.chub;
+    }
+} catch { /* storage unavailable */ }
 let root = null;
 
 const esc = (value) => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', '\'': '&#39;' }[c]));
@@ -677,7 +897,7 @@ const SAFE_STYLES = ['color', 'background-color', 'text-align', 'font-weight', '
 
 /**
  * Cleans creator-written HTML for display, keeping its colours.
- * @param {string} html Raw HTML from JanitorAI
+ * @param {string} html Raw HTML
  * @param {boolean} [textOnly] Drop images and other media (used on the small cards)
  */
 function richHtml(html, textOnly = false) {
@@ -719,31 +939,54 @@ function tagChips(item) {
     return chips.join('');
 }
 
+/** Turns a JanitorAI list item into the shared card model. */
+function janitorModel(item) {
+    return {
+        source: 'janitor',
+        id: item.id,
+        kind: 'character',
+        name: item.name,
+        image: avatarUrl(item.avatar, 400),
+        creatorId: item.creator_id,
+        creatorName: item.creator_name,
+        verified: !!item.creator_verified,
+        blurb: richHtml(item.description, true),
+        stats: `<i class="fa-regular fa-comments"></i> ${compact(item.stats?.message)}${item.public_chat_count ? ` <i class="fa-regular fa-file-lines"></i> ${compact(item.public_chat_count)}` : ''}`,
+        statsTitle: `${compact(item.stats?.message)} messages · ${compact(item.stats?.chat)} chats`,
+        chips: tagChips(item),
+        tokens: item.total_tokens,
+        updated: item.updated_at || item.first_published_at || item.created_at,
+    };
+}
+
 function buildUi() {
     root = document.createElement('div');
     root.id = 'jai_browser';
     root.innerHTML = `
         <div class="jai_window">
             <div class="jai_header">
-                <b class="jai_title"><i class="fa-solid fa-broom"></i> Janitor Importer</b>
+                <b class="jai_title"><i class="fa-solid fa-store"></i> Bot Bazaar</b>
+                <div class="jai_tabs jai_sources" id="jai_sources">
+                    <div class="jai_tab" data-source="janitor" title="Browse JanitorAI"><span>JanitorAI</span></div>
+                    <div class="jai_tab" data-source="chub" title="Browse Chub (chub.ai)"><span>Chub</span></div>
+                </div>
                 <span id="jai_status" class="jai_status"></span>
                 <div class="jai_btn" id="jai_account" title="Connect or change your JanitorAI account"><i class="fa-solid fa-key"></i><span>Account</span></div>
                 <div class="jai_btn jai_icon" id="jai_close" title="Close"><i class="fa-solid fa-xmark"></i></div>
             </div>
             <div class="jai_nav">
-                <div class="jai_tabs" id="jai_sorts">
-                    <div class="jai_tab" data-sort="trending"><i class="fa-solid fa-fire"></i><span>Trending</span></div>
-                    <div class="jai_tab" data-sort="popular"><i class="fa-solid fa-star"></i><span>Popular</span></div>
-                    <div class="jai_tab" data-sort="latest"><i class="fa-solid fa-clock"></i><span>Latest</span></div>
-                    <div class="jai_tab" data-sort="relevance" title="Best match for your search"><i class="fa-solid fa-bullseye"></i><span>Best match</span></div>
+                <div class="jai_tabs" id="jai_kinds">
+                    <div class="jai_tab" data-kind="characters"><i class="fa-solid fa-user"></i><span>Characters</span></div>
+                    <div class="jai_tab" data-kind="lorebooks"><i class="fa-solid fa-book-atlas"></i><span>Lorebooks</span></div>
                 </div>
+                <div class="jai_tabs" id="jai_sorts"></div>
                 <div class="jai_tabs" id="jai_modes">
                     <div class="jai_tab" data-mode="all"><i class="fa-solid fa-eye"></i><span>All</span></div>
                     <div class="jai_tab" data-mode="sfw"><i class="fa-solid fa-eye-slash"></i><span>Limited only</span></div>
                 </div>
                 <div class="jai_search">
                     <i class="fa-solid fa-magnifying-glass"></i>
-                    <input id="jai_search" type="search" placeholder="Search… or paste a JanitorAI character link">
+                    <input id="jai_search" type="search" placeholder="Search… or paste a JanitorAI / Chub link">
                 </div>
                 <select id="jai_tag"><option value="">Any tag</option></select>
             </div>
@@ -767,6 +1010,17 @@ function buildUi() {
     $('#jai_account').addEventListener('click', () => showConnect());
     $('#jai_search').addEventListener('keydown', (event) => event.key === 'Enter' && submitSearch());
     $('#jai_tag').addEventListener('change', () => { state.tag = $('#jai_tag').value; state.page = 1; loadList(); });
+    $('#jai_sources').addEventListener('click', (event) => {
+        const source = event.target.closest('[data-source]')?.dataset.source;
+        if (source && source !== state.source && !state.loading) switchSource(source);
+    });
+    $('#jai_kinds').addEventListener('click', (event) => {
+        const kind = event.target.closest('[data-kind]')?.dataset.kind;
+        if (!kind || state.loading) return;
+        state.kind = kind;
+        state.page = 1;
+        loadList();
+    });
     $('#jai_sorts').addEventListener('click', (event) => {
         const sort = event.target.closest('[data-sort]')?.dataset.sort;
         if (!sort || state.loading) return;
@@ -788,22 +1042,24 @@ function buildUi() {
     root.querySelector('.jai_body').addEventListener('click', (event) => {
         if (event.target.closest('#jai_message')) return;
         const creator = event.target.closest('[data-creator]');
-        if (creator) return openCreator(creator.dataset.creator, creator.dataset.name);
+        if (creator) return openCreator(creator.dataset.creator, creator.dataset.name, creator.dataset.source || state.source);
         const tag = event.target.closest('[data-tag]');
         if (tag) return filterBy({ tag: tag.dataset.tag });
         const customTag = event.target.closest('[data-ctag]');
         if (customTag) return filterBy({ customTag: customTag.dataset.ctag });
+        const topic = event.target.closest('[data-topic]');
+        if (topic) return filterBy({ topic: topic.dataset.topic });
         const clear = event.target.closest('[data-clear]')?.dataset.clear;
         if (clear) return clearFilter(clear);
         if (event.target.closest('[data-more]')) return event.target.closest('.jai_about').classList.toggle('jai_expanded');
         const card = event.target.closest('.jai_card');
-        if (card) openDetail(card.dataset.id);
+        if (card) openItem(card.dataset.source, card.dataset.id);
     });
 
     // If an avatar doesn't load as a plain image, fetch it ourselves and show it from memory.
     root.addEventListener('error', async (event) => {
         const img = event.target;
-        if (!(img instanceof HTMLImageElement) || img.dataset.jaiRetried || !/^https:\/\/([a-z0-9-]+\.)*janitorai\.com\//i.test(img.src)) return;
+        if (!(img instanceof HTMLImageElement) || img.dataset.jaiRetried || !/^https:\/\//i.test(img.src)) return;
         img.dataset.jaiRetried = '1';
         const blob = await fetchImage(img.src);
         if (blob) img.src = URL.createObjectURL(blob);
@@ -823,24 +1079,59 @@ function buildUi() {
 
 const openSite = () => window.open(SITE, 'jai_site');
 const hasNext = () => state.size > 0 && state.page * state.size < state.total;
+const openItem = (source, id) => (source === 'chub' ? openChubDetail(id) : openDetail(id));
+
+function resetFilters() {
+    state.page = 1;
+    state.search = '';
+    state.tag = '';
+    state.customTag = '';
+    state.topic = '';
+    state.creator = null;
+    if (root) $('#jai_search').value = '';
+}
+
+function switchSource(source) {
+    state.source = source;
+    state.kind = 'characters';
+    state.sort = DEFAULT_SORT[source];
+    resetFilters();
+    try { localStorage.setItem(SOURCE_KEY, source); } catch { /* storage unavailable */ }
+    loadList();
+}
 
 function submitSearch() {
     const text = $('#jai_search').value.trim();
-    const id = /janitorai\.com\/characters\//i.test(text) || /^[0-9a-f-]{36}$/i.test(text) ? text.match(UUID)?.[0] : null;
-    if (id || /janitorai\.com\/profiles\//i.test(text)) $('#jai_search').value = state.search;
-    if (id) return openDetail(id);
-    const profile = /janitorai\.com\/profiles\//i.test(text) ? text.match(UUID)?.[0] : null;
-    if (profile) return openCreator(profile, '');
-    if (text && !state.search) state.sort = 'relevance';
-    if (!text && state.sort === 'relevance') state.sort = 'popular';
+    const chub = text.match(/(?:chub\.ai|characterhub\.org)\/(characters|lorebooks)\/([^/?#\s]+\/[^/?#\s]+)/i);
+    const janitorCharacter = /janitorai\.com\/characters\//i.test(text) || /^[0-9a-f-]{36}$/i.test(text) ? text.match(UUID)?.[0] : null;
+    const janitorProfile = /janitorai\.com\/profiles\//i.test(text) ? text.match(UUID)?.[0] : null;
+
+    if (chub || janitorCharacter || janitorProfile) {
+        $('#jai_search').value = state.search;
+        const source = chub ? 'chub' : 'janitor';
+        if (state.source !== source) {
+            state.source = source;
+            state.sort = DEFAULT_SORT[source];
+            resetFilters();
+            try { localStorage.setItem(SOURCE_KEY, source); } catch { /* storage unavailable */ }
+        }
+        if (chub) return openChubDetail(chub[1].toLowerCase() === 'lorebooks' ? `lorebooks/${chub[2]}` : chub[2]);
+        if (janitorCharacter) return openDetail(janitorCharacter);
+        return openCreator(janitorProfile, '', 'janitor');
+    }
+
+    const searchSort = SEARCH_SORT[state.source];
+    if (text && !state.search) state.sort = searchSort;
+    if (!text && state.sort === searchSort) state.sort = DEFAULT_SORT[state.source];
     state.search = text;
     state.page = 1;
     loadList();
 }
 
-function filterBy({ tag, customTag }) {
+function filterBy({ tag, customTag, topic }) {
     if (tag !== undefined) state.tag = String(tag);
     if (customTag !== undefined) state.customTag = customTag;
+    if (topic !== undefined) state.topic = topic;
     state.page = 1;
     loadList();
 }
@@ -848,36 +1139,38 @@ function filterBy({ tag, customTag }) {
 function clearFilter(which) {
     if (which === 'creator') {
         state.creator = null;
-        state.sort = 'popular';
+        state.sort = DEFAULT_SORT[state.source];
     }
     if (which === 'customTag') state.customTag = '';
     if (which === 'tag') state.tag = '';
+    if (which === 'topic') state.topic = '';
     if (which === 'search') {
         state.search = '';
         $('#jai_search').value = '';
-        if (state.sort === 'relevance') state.sort = 'popular';
+        if (state.sort === SEARCH_SORT[state.source]) state.sort = DEFAULT_SORT[state.source];
     }
     state.page = 1;
     loadList();
 }
 
 /** Shows everything one creator has published. */
-function openCreator(id, name) {
-    state.creator = { id, name: name || '', profile: null };
-    state.sort = 'latest';
-    state.search = '';
-    state.tag = '';
-    state.customTag = '';
-    state.page = 1;
-    $('#jai_search').value = '';
+function openCreator(id, name, source = state.source) {
+    if (source !== state.source) {
+        state.source = source;
+        try { localStorage.setItem(SOURCE_KEY, source); } catch { /* storage unavailable */ }
+    }
+    resetFilters();
+    state.kind = 'characters';
+    state.creator = { id: source === 'chub' ? (name || id) : id, name: name || '', profile: null };
+    state.sort = CREATOR_SORT[source];
     loadList();
-    loadCreator(id);
+    loadCreator(state.creator.id);
 }
 
 function resume() {
-    if (state.detail) return openDetail(state.detail);
-    if (!signedIn()) {
-        // Anonymous visitors can only see the first page without a search, so go back to it.
+    if (state.detail) return openItem(state.detailSource, state.detail);
+    if (!signedIn() && state.source === 'janitor') {
+        // Anonymous JanitorAI visitors can only see the first page without a search, so go back to it.
         state.page = 1;
         state.search = '';
         state.customTag = '';
@@ -895,7 +1188,7 @@ function retry() {
 async function copyText(text, message) {
     try {
         await navigator.clipboard.writeText(text);
-        toastr.info(message, 'Janitor Importer');
+        toastr.info(message, 'Bot Bazaar');
     } catch {
         // Clipboard access is blocked on plain-http pages that aren't localhost (e.g. a phone on the home network).
         await ctx().Popup.show.input('Copy this text', 'Select all of it and copy.', text);
@@ -904,6 +1197,11 @@ async function copyText(text, message) {
 
 function updateStatus() {
     if (!root) return;
+    if (state.source === 'chub') {
+        $('#jai_status').className = 'jai_status jai_ok';
+        $('#jai_status').textContent = 'Chub · no account needed';
+        return;
+    }
     const { token, expired, minutesLeft } = account();
     let ok = true;
     let text;
@@ -986,19 +1284,19 @@ async function pasteToken() {
     try {
         text = await navigator.clipboard.readText();
     } catch {
-        return toastr.warning('The browser did not allow reading the clipboard. Paste the token into the box and press Connect.', 'Janitor Importer');
+        return toastr.warning('The browser did not allow reading the clipboard. Paste the token into the box and press Connect.', 'Bot Bazaar');
     }
-    if (!extractToken(text)) return toastr.warning('The clipboard does not contain a JanitorAI token. Press the token bookmark on the JanitorAI tab first.', 'Janitor Importer');
+    if (!extractToken(text)) return toastr.warning('The clipboard does not contain a JanitorAI token. Press the token bookmark on the JanitorAI tab first.', 'Bot Bazaar');
     $('#jai_token').value = text;
     await saveToken();
 }
 
 async function saveToken() {
     const token = extractToken($('#jai_token').value);
-    if (!token) return toastr.warning('That text does not contain a JanitorAI token.', 'Janitor Importer');
+    if (!token) return toastr.warning('That text does not contain a JanitorAI token.', 'Bot Bazaar');
     const expiry = tokenExpiry(token);
     if (expiry !== null && expiry < Date.now()) {
-        return toastr.warning('That token has already expired. Reload JanitorAI and copy a fresh one.', 'Janitor Importer');
+        return toastr.warning('That token has already expired. Reload JanitorAI and copy a fresh one.', 'Bot Bazaar');
     }
 
     settings().token = token;
@@ -1013,7 +1311,7 @@ async function saveToken() {
         disconnect(false);
         return showConnect('JanitorAI did not accept that token. Make sure you are signed in on JanitorAI and copy it again.');
     }
-    toastr.success('JanitorAI account connected.', 'Janitor Importer');
+    toastr.success('JanitorAI account connected.', 'Bot Bazaar');
     resume();
 }
 
@@ -1022,7 +1320,7 @@ function disconnect(interactive = true) {
     ctx().saveSettingsDebounced();
     updateStatus();
     if (interactive) {
-        toastr.info('JanitorAI token removed.', 'Janitor Importer');
+        toastr.info('JanitorAI token removed.', 'Bot Bazaar');
         showConnect();
     }
 }
@@ -1059,14 +1357,20 @@ function setView(view) {
     if (view !== 'detail') state.detail = null;
 }
 
-/** Highlights the active tabs and lists the active filters as removable chips. */
+/** Draws the tabs for the current site and lists the active filters as removable chips. */
 function renderControls() {
-    root.querySelectorAll('#jai_sorts .jai_tab').forEach((tab) => {
-        tab.classList.toggle('jai_active', tab.dataset.sort === state.sort);
-        if (tab.dataset.sort === 'relevance') tab.style.display = state.search ? '' : 'none';
-    });
+    root.querySelectorAll('#jai_sources .jai_tab').forEach(tab => tab.classList.toggle('jai_active', tab.dataset.source === state.source));
+    const isChub = state.source === 'chub';
+    $('#jai_kinds').style.display = isChub ? '' : 'none';
+    root.querySelectorAll('#jai_kinds .jai_tab').forEach(tab => tab.classList.toggle('jai_active', tab.dataset.kind === state.kind));
+    $('#jai_sorts').innerHTML = SORTS[state.source]
+        .filter(([sort]) => sort !== SEARCH_SORT[state.source] || state.search)
+        .map(([sort, icon, label]) => `<div class="jai_tab ${sort === state.sort ? 'jai_active' : ''}" data-sort="${sort}"><i class="fa-solid ${icon}"></i><span>${label}</span></div>`)
+        .join('');
     root.querySelectorAll('#jai_modes .jai_tab').forEach(tab => tab.classList.toggle('jai_active', tab.dataset.mode === state.mode));
+    $('#jai_tag').style.display = isChub ? 'none' : '';
     $('#jai_tag').value = state.tag;
+    $('#jai_account').style.display = isChub ? 'none' : '';
 
     const chip = (which, icon, label) => `<span class="jai_filter"><i class="fa-solid ${icon}"></i> ${esc(label)} <i class="fa-solid fa-xmark" data-clear="${which}" title="Remove this filter"></i></span>`;
     const chips = [];
@@ -1074,6 +1378,7 @@ function renderControls() {
     if (state.search) chips.push(chip('search', 'fa-magnifying-glass', state.search));
     if (state.tag) chips.push(chip('tag', 'fa-tag', $('#jai_tag').selectedOptions[0]?.textContent || 'tag'));
     if (state.customTag) chips.push(chip('customTag', 'fa-hashtag', state.customTag));
+    if (state.topic) chips.push(chip('topic', 'fa-tag', state.topic));
     $('#jai_filters').innerHTML = chips.join('');
 }
 
@@ -1096,64 +1401,79 @@ async function loadTags() {
     }
 }
 
+async function janitorList() {
+    const query = new URLSearchParams({ page: state.page, mode: state.mode, sort: state.sort });
+    if (state.search) query.set('search', state.search);
+    let path = `/hampter/characters?${query}`;
+    if (state.tag) path += `&tag_id[]=${encodeURIComponent(state.tag)}`;
+    if (state.customTag) path += `&custom_tags[]=${encodeURIComponent(state.customTag)}`;
+    if (state.creator) path += `&user_id[]=${encodeURIComponent(state.creator.id)}`;
+
+    const result = await api(path);
+    const items = Array.isArray(result?.data) ? result.data : [];
+    return { items: items.map(janitorModel), total: Number(result?.total) || items.length, size: Number(result?.size) || items.length };
+}
+
+let listRequest = 0;
+
 async function loadList() {
     setView('grid');
     renderControls();
+    updateStatus();
     state.loading = true;
+    const request = ++listRequest;
     showMessage('<i class="fa-solid fa-spinner fa-spin"></i> Loading…');
     $('#jai_grid').innerHTML = '';
     try {
-        const query = new URLSearchParams({ page: state.page, mode: state.mode, sort: state.sort });
-        if (state.search) query.set('search', state.search);
-        let path = `/hampter/characters?${query}`;
-        if (state.tag) path += `&tag_id[]=${encodeURIComponent(state.tag)}`;
-        if (state.customTag) path += `&custom_tags[]=${encodeURIComponent(state.customTag)}`;
-        if (state.creator) path += `&user_id[]=${encodeURIComponent(state.creator.id)}`;
+        const { items, total, size } = state.source === 'chub' ? await chubList() : await janitorList();
+        if (request !== listRequest) return;
+        state.total = total;
+        state.size = size;
+        const countBox = root.querySelector('.jai_creator_count');
+        if (countBox && state.creator) {
+            countBox.style.display = '';
+            countBox.querySelector('b').textContent = compact(total);
+        }
 
-        const result = await api(path);
-        const items = Array.isArray(result?.data) ? result.data : [];
-        state.total = Number(result?.total) || items.length;
-        state.size = Number(result?.size) || items.length;
-
-        if (state.creator && !state.creator.name && items[0]?.creator_name) {
-            state.creator.name = items[0].creator_name;
+        if (state.creator && !state.creator.name && items[0]?.creatorName) {
+            state.creator.name = items[0].creatorName;
             renderControls();
         }
         $('#jai_grid').innerHTML = items.map(renderCard).join('');
         root.querySelector('.jai_body').scrollTop = 0;
-        showMessage(items.length ? '' : 'No characters found.');
-        loadTags();
+        showMessage(items.length ? '' : 'Nothing found.');
+        if (state.source === 'janitor') loadTags();
     } catch (error) {
-        showError(error);
+        if (request === listRequest) showError(error);
     } finally {
-        state.loading = false;
-        updateStatus();
-        const pages = state.size ? Math.ceil(Math.min(state.total, 10000) / state.size) : 0;
-        $('#jai_page').textContent = pages > 1 ? `Page ${state.page} of ${compact(pages)}` : `Page ${state.page}`;
-        $('#jai_prev').classList.toggle('jai_disabled', state.page <= 1);
-        $('#jai_next').classList.toggle('jai_disabled', !hasNext());
+        if (request === listRequest) {
+            state.loading = false;
+            updateStatus();
+            const pages = state.size ? Math.ceil(Math.min(state.total, 10000) / state.size) : 0;
+            $('#jai_page').textContent = pages > 1 ? `Page ${state.page} of ${compact(pages)}` : `Page ${state.page}`;
+            $('#jai_prev').classList.toggle('jai_disabled', state.page <= 1);
+            $('#jai_next').classList.toggle('jai_disabled', !hasNext());
+        }
     }
 }
 
-function renderCard(item) {
-    const updated = item.updated_at || item.first_published_at || item.created_at;
-    const chats = item.public_chat_count ? `<i class="fa-regular fa-file-lines"></i> ${compact(item.public_chat_count)}` : '';
+function renderCard(model) {
     return `
-        <div class="jai_card" data-id="${esc(item.id)}">
-            <div class="jai_card_title" title="${esc(item.name)}">${esc(item.name)}</div>
+        <div class="jai_card" data-id="${esc(model.id)}" data-source="${model.source}">
+            <div class="jai_card_title" title="${esc(model.name)}">${model.kind === 'lorebook' ? '<i class="fa-solid fa-book-atlas"></i> ' : ''}${esc(model.name)}</div>
             <div class="jai_thumb">
-                ${item.avatar ? `<img loading="lazy" referrerpolicy="no-referrer" src="${esc(avatarUrl(item.avatar, 400))}" alt="">` : ''}
-                <span class="jai_stats" title="${esc(`${compact(item.stats?.message)} messages · ${compact(item.stats?.chat)} chats`)}"><i class="fa-regular fa-comments"></i> ${compact(item.stats?.message)} ${chats}</span>
+                ${model.image ? `<img loading="lazy" referrerpolicy="no-referrer" src="${esc(model.image)}" alt="">` : ''}
+                <span class="jai_stats" title="${esc(model.statsTitle)}">${model.stats}</span>
             </div>
             <div class="jai_card_body">
-                <span class="jai_creator_link" data-creator="${esc(item.creator_id)}" data-name="${esc(item.creator_name)}" title="Show all characters by this creator">@${esc(item.creator_name)}${verifiedBadge(item.creator_verified)}</span>
-                <div class="jai_blurb">${richHtml(item.description, true)}</div>
+                <span class="jai_creator_link" data-creator="${esc(model.creatorId)}" data-name="${esc(model.creatorName)}" data-source="${model.source}" title="Show everything by this creator">@${esc(model.creatorName)}${verifiedBadge(model.verified)}</span>
+                <div class="jai_blurb">${model.blurb}</div>
             </div>
             <div class="jai_spark"></div>
-            <div class="jai_tags">${tagChips(item)}</div>
+            <div class="jai_tags">${model.chips}</div>
             <div class="jai_card_foot">
-                <span>${compact(item.total_tokens)} tokens</span>
-                ${updated ? `<span title="Last updated ${esc(fullDate(updated))}"><i class="fa-regular fa-clock"></i> ${esc(timeAgo(updated))}</span>` : ''}
+                <span>${compact(model.tokens)} tokens</span>
+                ${model.updated ? `<span title="Last updated ${esc(fullDate(model.updated))}"><i class="fa-regular fa-clock"></i> ${esc(timeAgo(model.updated))}</span>` : ''}
             </div>
         </div>`;
 }
@@ -1162,31 +1482,57 @@ function renderCard(item) {
 async function loadCreator(id) {
     const box = $('#jai_creator');
     box.innerHTML = '';
-    let profile;
+    const source = state.source;
+    let info;
     try {
-        profile = await api(`/hampter/profiles/${encodeURIComponent(id)}`);
+        if (source === 'chub') {
+            const user = await chubGet(`${CHUB_API}/api/users/${encodeURIComponent(id)}`);
+            info = {
+                name: user.username || user.name || id,
+                avatar: user.avatar_url,
+                verified: false,
+                followers: user.n_followers,
+                count: null,
+                since: null,
+                about: markdownToHtml(user.bio),
+                link: `${CHUB_SITE}/users/${encodeURIComponent(user.username || id)}`,
+                site: 'Chub',
+            };
+        } else {
+            const profile = await api(`/hampter/profiles/${encodeURIComponent(id)}`);
+            const avatar = str(profile.avatar);
+            info = {
+                name: profile.user_name,
+                avatar: /^https?:\/\//i.test(avatar) ? avatar : (avatar ? `https://ella.janitorai.com/avatars/${encodeURIComponent(avatar)}?width=200` : ''),
+                verified: profile.is_verified,
+                followers: Number(profile.followers_count),
+                count: null,
+                since: profile.created_at,
+                about: profile.about_me,
+                link: `${SITE}/profiles/${encodeURIComponent(id)}`,
+                site: 'JanitorAI',
+            };
+        }
     } catch (error) {
         console.warn(TAG, 'Could not load creator profile', error);
         return;
     }
-    if (state.creator?.id !== id) return;
-    state.creator.profile = profile;
-    if (profile.user_name) state.creator.name = profile.user_name;
+    if (state.creator?.id !== id || state.source !== source) return;
+    if (info.name) state.creator.name = info.name;
     renderControls();
 
-    const avatar = str(profile.avatar);
-    const avatarSrc = /^https?:\/\//i.test(avatar) ? avatar : (avatar ? `https://ella.janitorai.com/avatars/${encodeURIComponent(avatar)}?width=200` : '');
-    const about = richHtml(profile.about_me);
+    const about = richHtml(info.about);
+    const count = info.count ?? state.total;
     box.innerHTML = `
         <div class="jai_creator_head">
-            ${avatarSrc ? `<img referrerpolicy="no-referrer" src="${esc(avatarSrc)}" alt="">` : ''}
+            ${info.avatar ? `<img referrerpolicy="no-referrer" src="${esc(info.avatar)}" alt="">` : ''}
             <div>
-                <div class="jai_creator_name">@${esc(profile.user_name || state.creator.name)}${verifiedBadge(profile.is_verified)}</div>
+                <div class="jai_creator_name">@${esc(info.name || state.creator.name)}${verifiedBadge(info.verified)}</div>
                 <div class="jai_creator_meta">
-                    <span><i class="fa-solid fa-user-group"></i> ${compact(Number(profile.followers_count))} followers</span>
-                    ${state.total ? `<span><i class="fa-solid fa-masks-theater"></i> ${compact(state.total)} characters</span>` : ''}
-                    ${profile.created_at ? `<span><i class="fa-regular fa-calendar"></i> Member since ${esc(fullDate(profile.created_at))}</span>` : ''}
-                    <a href="${SITE}/profiles/${esc(id)}" target="_blank" rel="noopener"><i class="fa-solid fa-up-right-from-square"></i> View on JanitorAI</a>
+                    ${Number.isFinite(info.followers) ? `<span><i class="fa-solid fa-user-group"></i> ${compact(info.followers)} followers</span>` : ''}
+                    <span class="jai_creator_count" ${count ? '' : 'style="display:none"'}><i class="fa-solid fa-masks-theater"></i> <b>${compact(count)}</b> ${state.kind === 'lorebooks' ? 'lorebooks' : 'characters'}</span>
+                    ${info.since ? `<span><i class="fa-regular fa-calendar"></i> Member since ${esc(fullDate(info.since))}</span>` : ''}
+                    <a href="${esc(info.link)}" target="_blank" rel="noopener"><i class="fa-solid fa-up-right-from-square"></i> View on ${info.site}</a>
                 </div>
             </div>
         </div>
@@ -1197,6 +1543,7 @@ async function loadCreator(id) {
 async function openDetail(id) {
     setView('detail');
     state.detail = id;
+    state.detailSource = 'janitor';
     const box = $('#jai_detail');
     box.innerHTML = '';
     showMessage('<i class="fa-solid fa-spinner fa-spin"></i> Loading character…');
@@ -1357,7 +1704,7 @@ async function openDetail(id) {
             await importLorebookOnly(detail);
         } catch (error) {
             console.error(TAG, 'Lorebook import failed', error);
-            toastr.error(String(error?.message || error), 'Janitor Importer: lorebook import failed');
+            toastr.error(String(error?.message || error), 'Bot Bazaar: lorebook import failed');
         } finally {
             bookButton.classList.remove('jai_disabled');
         }
@@ -1372,11 +1719,112 @@ async function openDetail(id) {
             if (await importCharacter(outside ? withOutsideDefinition(detail, outside) : detail)) closeBrowser();
         } catch (error) {
             console.error(TAG, 'Import failed', error);
-            toastr.error(String(error?.message || error), 'Janitor Importer: import failed');
+            toastr.error(String(error?.message || error), 'Bot Bazaar: import failed');
         } finally {
             importButton.classList.remove('jai_disabled');
             importButton.querySelector('span').textContent = 'Import to SillyTavern';
         }
+    });
+}
+
+/** Character or lorebook page for Chub. */
+async function openChubDetail(fullPath) {
+    setView('detail');
+    state.detail = fullPath;
+    state.detailSource = 'chub';
+    const box = $('#jai_detail');
+    box.innerHTML = '';
+    showMessage('<i class="fa-solid fa-spinner fa-spin"></i> Loading…');
+
+    let node;
+    try {
+        node = await chubDetail(fullPath);
+    } catch (error) {
+        return showError(error);
+    }
+    if (state.detail !== fullPath) return;
+    showMessage('');
+
+    const def = node.definition || {};
+    const { isLorebook, creator } = chubParts(node.fullPath || fullPath);
+    node.fullPath = node.fullPath || fullPath;
+    const embeddedCount = Array.isArray(def.embedded_lorebook?.entries) ? def.embedded_lorebook.entries.length : 0;
+    const related = relatedLorebooks(node);
+    const greetingCount = [def.first_message, ...(Array.isArray(def.alternate_greetings) ? def.alternate_greetings : [])].map(str).filter(g => g.trim()).length;
+    const bookParts = [];
+    if (embeddedCount) bookParts.push(`${embeddedCount} entries in the card`);
+    if (related.length) bookParts.push(`${related.length} linked lorebook${related.length > 1 ? 's' : ''}`);
+    const hasBook = isLorebook || bookParts.length > 0;
+    const description = str(def.description).trim() || str(node.description).trim();
+
+    box.innerHTML = `
+        <div class="jai_detail_side">
+            ${(node.max_res_url || node.avatar_url) ? `<img referrerpolicy="no-referrer" src="${esc(node.max_res_url || node.avatar_url)}" alt="">` : ''}
+            <div class="jai_btn jai_primary jai_import"><i class="fa-solid ${isLorebook ? 'fa-book-atlas' : 'fa-file-import'}"></i><span>${isLorebook ? 'Import lorebook' : 'Import to SillyTavern'}</span></div>
+            ${!isLorebook && hasBook ? '<div class="jai_btn jai_book_only" title="Save only the lorebook as a World Info file"><i class="fa-solid fa-book-atlas"></i><span>Lorebook only</span></div>' : ''}
+            <div class="jai_btn jai_back"><i class="fa-solid fa-arrow-left"></i><span>Back to list</span></div>
+            <a class="jai_btn" href="${esc(chubPageUrl(node.fullPath))}" target="_blank" rel="noopener"><i class="fa-solid fa-up-right-from-square"></i><span>View on Chub</span></a>
+            <div class="jai_btn jai_raw" title="Copy the raw data Chub sent (useful for bug reports)"><i class="fa-solid fa-copy"></i><span>Copy raw data</span></div>
+        </div>
+        <div class="jai_detail_main">
+            <h2 class="jai_detail_title">${isLorebook ? '<i class="fa-solid fa-book-atlas"></i> ' : ''}${esc(node.name)}</h2>
+            <div class="jai_detail_by">
+                <span class="jai_creator_link" data-creator="${esc(creator)}" data-name="${esc(creator)}" data-source="chub" title="Show everything by this creator">@${esc(creator)}${verifiedBadge(node.verified)}</span>
+                ${node.tagline ? `<span>${esc(node.tagline)}</span>` : ''}
+            </div>
+            <div class="jai_statline">
+                <span title="Stars"><i class="fa-solid fa-star"></i> ${compact(node.starCount)}</span>
+                <span title="Favorites"><i class="fa-solid fa-heart"></i> ${compact(node.n_favorites)}</span>
+                ${isLorebook ? '' : `<span title="Chats"><i class="fa-regular fa-message"></i> ${compact(node.nChats)} chats</span>`}
+                ${isLorebook ? '' : `<span title="Messages"><i class="fa-regular fa-comments"></i> ${compact(node.nMessages)} messages</span>`}
+                ${node.nTokens ? `<span><i class="fa-solid fa-coins"></i> ${compact(node.nTokens)} tokens</span>` : ''}
+                ${!isLorebook && greetingCount ? `<span><i class="fa-regular fa-hand"></i> ${greetingCount} greeting${greetingCount > 1 ? 's' : ''}</span>` : ''}
+            </div>
+            <div class="jai_dates">
+                ${node.createdAt ? `<span><i class="fa-regular fa-calendar-plus"></i> Created ${esc(fullDate(node.createdAt))}</span>` : ''}
+                ${node.lastActivityAt ? `<span><i class="fa-regular fa-clock"></i> Updated ${esc(fullDate(node.lastActivityAt))} (${esc(timeAgo(node.lastActivityAt))})</span>` : ''}
+            </div>
+            <div class="jai_facts">
+                ${isLorebook
+        ? `<span class="${embeddedCount ? 'jai_ok' : ''}"><i class="fa-solid fa-book-atlas"></i> ${embeddedCount ? `${embeddedCount} entries` : 'Lorebook'}</span>`
+        : `<span class="jai_ok"><i class="fa-solid fa-check"></i> Definition available</span>
+                <span class="${bookParts.length ? 'jai_ok' : ''}"><i class="fa-solid fa-book-atlas"></i> ${bookParts.length ? `Lorebook: ${esc(bookParts.join(' + '))}` : 'No lorebook attached'}</span>`}
+            </div>
+            <div class="jai_tags">${topicChips(node.topics)}</div>
+            <div class="jai_description jai_rich">${description ? richHtml(markdownToHtml(description)) : '<i>No description.</i>'}</div>
+        </div>`;
+
+    box.querySelector('.jai_back').addEventListener('click', () => ($('#jai_grid').children.length ? (setView('grid'), showMessage('')) : loadList()));
+    box.querySelector('.jai_raw').addEventListener('click', () => copyText(JSON.stringify(node, null, 2), 'Raw data copied to the clipboard.'));
+
+    const run = (button, label, task) => button?.addEventListener('click', async () => {
+        if (button.classList.contains('jai_disabled')) return;
+        button.classList.add('jai_disabled');
+        button.querySelector('span').textContent = 'Importing…';
+        try {
+            await task();
+        } catch (error) {
+            console.error(TAG, 'Chub import failed', error);
+            toastr.error(String(error?.message || error), 'Bot Bazaar: import failed');
+        } finally {
+            button.classList.remove('jai_disabled');
+            button.querySelector('span').textContent = label;
+        }
+    });
+
+    run(box.querySelector('.jai_import'), isLorebook ? 'Import lorebook' : 'Import to SillyTavern', async () => {
+        if (isLorebook) return importChubLorebook(node);
+        if (await importChubCharacter(node)) closeBrowser();
+    });
+    run(box.querySelector('.jai_book_only'), 'Lorebook only', async () => {
+        const name = safeName(def.name || node.name) || 'Chub character';
+        const { book, warnings } = await chubBook(node, `${name} (Chub Lorebook)`);
+        warnings.forEach(w => toastr.warning(w, 'Bot Bazaar', { timeOut: 12000 }));
+        if (!book) return toastr.info('No lorebook entries could be imported.', 'Bot Bazaar');
+        const { saveWorldInfo, convertCharacterBook, updateWorldInfoList } = ctx();
+        await saveWorldInfo(book.name, convertCharacterBook(structuredClone(book)), true);
+        await updateWorldInfoList();
+        toastr.success(`"${book.name}" saved with ${book.entries.length} entries. To attach it, open a character and pick it with the globe button.`, 'Bot Bazaar', { timeOut: 12000 });
     });
 }
 
@@ -1399,8 +1847,8 @@ function addButtons() {
     if (external && !document.getElementById('jai_open_button')) {
         const button = document.createElement('div');
         button.id = 'jai_open_button';
-        button.className = 'menu_button fa-solid fa-broom';
-        button.title = 'Browse & import characters from JanitorAI';
+        button.className = 'menu_button fa-solid fa-store';
+        button.title = 'Bot Bazaar: browse & import characters from JanitorAI and Chub';
         button.addEventListener('click', openBrowser);
         external.insertAdjacentElement('afterend', button);
     }
@@ -1411,7 +1859,7 @@ function addButtons() {
         item.id = 'jai_menu_button';
         item.className = 'list-group-item flex-container flexGap5 interactable';
         item.tabIndex = 0;
-        item.innerHTML = '<div class="fa-solid fa-broom extensionsMenuExtensionButton"></div><span>Janitor Importer</span>';
+        item.innerHTML = '<div class="fa-solid fa-store extensionsMenuExtensionButton"></div><span>Bot Bazaar</span>';
         item.addEventListener('click', openBrowser);
         menu.appendChild(item);
     }

@@ -1,12 +1,12 @@
 {
-    "display_name": "Janitor Importer",
+    "display_name": "Bot Bazaar",
     "loading_order": 100,
     "requires": [],
     "optional": [],
     "js": "index.js",
     "css": "style.css",
     "author": "brabro1",
-    "version": "2.0.1",
-    "homePage": "https://github.com/brabro1/SillyTavern-Janitor-Importer",
+    "version": "3.0.0",
+    "homePage": "https://github.com/brabro1/SillyTavern-Bot-Bazaar",
     "auto_update": false
 }
