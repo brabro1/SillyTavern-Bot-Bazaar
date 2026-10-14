@@ -20,7 +20,10 @@ Click the broom button next to "Import content from external URL" in the charact
 - Search, more pages, character definitions and lorebooks need your JanitorAI login — press **Account**.
 - Open a character and press **Import to SillyTavern**. A shared lorebook becomes a World Info file
   that is linked to the character.
-- You can also paste a `janitorai.com/characters/...` link into the search box.
+- Click a creator's **@name** to see their profile and all their characters; click any tag to filter by it.
+- Cards show messages, public chats, tokens and when the character was last updated; the character
+  page adds created/updated dates and the creator's own coloured description.
+- You can also paste a `janitorai.com/characters/...` or `janitorai.com/profiles/...` link into the search box.
 - **Lorebook only** saves just the lorebook as a World Info file — handy when you already have the
   character card from somewhere else and only miss its lorebook.
 

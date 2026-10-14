@@ -608,14 +608,78 @@ async function importLorebookOnly(detail) {
 
 // ---------------------------------------------------------------------------------------------- UI
 
-const state = { page: 1, sort: 'popular', mode: 'all', search: '', tag: '', total: 0, size: 0, loading: false, tagsLoaded: false, detail: null };
+const state = {
+    page: 1, sort: 'popular', mode: 'all', search: '', tag: '', customTag: '', creator: null,
+    total: 0, size: 0, loading: false, tagsLoaded: false, detail: null,
+};
 let root = null;
 
 const esc = (value) => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', '\'': '&#39;' }[c]));
-const compact = (n) => (typeof n === 'number' ? Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 }).format(n) : '?');
+const compact = (n) => (Number.isFinite(Number(n)) && n !== null && n !== '' ? Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 }).format(Number(n)).toLowerCase() : '?');
 const $ = (selector) => root.querySelector(selector);
 const avatarUrl = (file, width) => (file ? `${AVATARS}${encodeURIComponent(file)}?width=${width}` : '');
-const sanitize = (html) => SillyTavern.libs.DOMPurify.sanitize(str(html), { FORBID_TAGS: ['style', 'form', 'input', 'button', 'iframe'], FORBID_ATTR: ['style', 'class', 'id'] });
+
+function timeAgo(iso) {
+    const time = Date.parse(iso);
+    if (!time) return '';
+    const seconds = (Date.now() - time) / 1000;
+    for (const [size, unit] of [[31536000, 'y'], [2592000, 'mo'], [86400, 'd'], [3600, 'h'], [60, 'min']]) {
+        if (seconds >= size) return `${Math.floor(seconds / size)}${unit} ago`;
+    }
+    return 'just now';
+}
+
+function fullDate(iso) {
+    const time = Date.parse(iso);
+    return time ? new Date(time).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }) : '';
+}
+
+// Creators style their descriptions with colours and alignment; keep those, drop everything that could affect layout.
+const SAFE_STYLES = ['color', 'background-color', 'text-align', 'font-weight', 'font-style', 'text-decoration', 'text-decoration-line'];
+
+/**
+ * Cleans creator-written HTML for display, keeping its colours.
+ * @param {string} html Raw HTML from JanitorAI
+ * @param {boolean} [textOnly] Drop images and other media (used on the small cards)
+ */
+function richHtml(html, textOnly = false) {
+    const clean = SillyTavern.libs.DOMPurify.sanitize(str(html), {
+        FORBID_TAGS: ['style', 'form', 'input', 'button', 'iframe', 'textarea', 'select', 'video', 'audio', 'object', 'embed', 'svg', 'math'],
+        FORBID_ATTR: ['class', 'id', 'srcset'],
+    });
+    const template = document.createElement('template');
+    template.innerHTML = clean;
+    template.content.querySelectorAll('[style]').forEach((el) => {
+        const kept = SAFE_STYLES
+            .map(prop => [prop, el.style.getPropertyValue(prop)])
+            .filter(([, value]) => value && !/url\(|var\(|expression/i.test(value))
+            .map(([prop, value]) => `${prop}:${value}`);
+        if (kept.length) el.setAttribute('style', kept.join(';'));
+        else el.removeAttribute('style');
+    });
+    template.content.querySelectorAll('a').forEach((a) => { a.target = '_blank'; a.rel = 'noopener noreferrer'; });
+    template.content.querySelectorAll('img').forEach((img) => {
+        if (textOnly) return img.remove();
+        img.referrerPolicy = 'no-referrer';
+        img.loading = 'lazy';
+    });
+    if (textOnly) template.content.querySelectorAll('hr, table, picture, figure').forEach(el => el.remove());
+    return template.innerHTML;
+}
+
+const verifiedBadge = (on) => (on ? ' <i class="fa-solid fa-circle-check jai_verified" title="Verified creator"></i>' : '');
+
+function tagChips(item) {
+    const chips = [];
+    if (item.is_nsfw) chips.push('<span class="jai_chip jai_limitless" title="Not limited to safe-for-work">Limitless</span>');
+    for (const tag of (Array.isArray(item.tags) ? item.tags : [])) {
+        chips.push(`<span class="jai_chip" data-tag="${esc(tag.id)}" title="${esc(tag.description || 'Show characters with this tag')}">${esc(tag.name)}</span>`);
+    }
+    for (const tag of (Array.isArray(item.custom_tags) ? item.custom_tags : [])) {
+        chips.push(`<span class="jai_chip jai_hash" data-ctag="${esc(tag)}" title="Show characters with this tag">#${esc(tag)}</span>`);
+    }
+    return chips.join('');
+}
 
 function buildUi() {
     root = document.createElement('div');
@@ -625,33 +689,37 @@ function buildUi() {
             <div class="jai_header">
                 <b class="jai_title"><i class="fa-solid fa-broom"></i> Janitor Importer</b>
                 <span id="jai_status" class="jai_status"></span>
-                <div class="menu_button menu_button_icon" id="jai_account" title="Connect or change your JanitorAI account"><i class="fa-solid fa-key"></i><span>Account</span></div>
-                <div class="menu_button fa-solid fa-xmark" id="jai_close" title="Close"></div>
+                <div class="jai_btn" id="jai_account" title="Connect or change your JanitorAI account"><i class="fa-solid fa-key"></i><span>Account</span></div>
+                <div class="jai_btn jai_icon" id="jai_close" title="Close"><i class="fa-solid fa-xmark"></i></div>
             </div>
-            <div class="jai_toolbar">
-                <input id="jai_search" class="text_pole" type="search" placeholder="Search characters… or paste a JanitorAI character link">
-                <select id="jai_sort" class="text_pole">
-                    <option value="popular">Popular</option>
-                    <option value="trending">Trending</option>
-                    <option value="latest">Latest</option>
-                </select>
-                <select id="jai_mode" class="text_pole">
-                    <option value="all">All</option>
-                    <option value="sfw">SFW</option>
-                    <option value="nsfw">NSFW</option>
-                </select>
-                <select id="jai_tag" class="text_pole"><option value="">Any tag</option></select>
-                <div class="menu_button menu_button_icon" id="jai_go"><i class="fa-solid fa-magnifying-glass"></i><span>Search</span></div>
+            <div class="jai_nav">
+                <div class="jai_tabs" id="jai_sorts">
+                    <div class="jai_tab" data-sort="trending"><i class="fa-solid fa-fire"></i><span>Trending</span></div>
+                    <div class="jai_tab" data-sort="popular"><i class="fa-solid fa-star"></i><span>Popular</span></div>
+                    <div class="jai_tab" data-sort="latest"><i class="fa-solid fa-clock"></i><span>Latest</span></div>
+                    <div class="jai_tab" data-sort="relevance" title="Best match for your search"><i class="fa-solid fa-bullseye"></i><span>Best match</span></div>
+                </div>
+                <div class="jai_tabs" id="jai_modes">
+                    <div class="jai_tab" data-mode="all"><i class="fa-solid fa-eye"></i><span>All</span></div>
+                    <div class="jai_tab" data-mode="sfw"><i class="fa-solid fa-eye-slash"></i><span>Limited only</span></div>
+                </div>
+                <div class="jai_search">
+                    <i class="fa-solid fa-magnifying-glass"></i>
+                    <input id="jai_search" type="search" placeholder="Search… or paste a JanitorAI character link">
+                </div>
+                <select id="jai_tag"><option value="">Any tag</option></select>
             </div>
             <div class="jai_body">
+                <div id="jai_filters" class="jai_filters"></div>
                 <div id="jai_message" class="jai_message"></div>
+                <div id="jai_creator" class="jai_creator"></div>
                 <div id="jai_grid" class="jai_grid"></div>
                 <div id="jai_detail" class="jai_detail"></div>
             </div>
             <div class="jai_footer">
-                <div class="menu_button menu_button_icon" id="jai_prev"><i class="fa-solid fa-chevron-left"></i><span>Prev</span></div>
+                <div class="jai_btn" id="jai_prev"><i class="fa-solid fa-chevron-left"></i><span>Prev</span></div>
                 <span id="jai_page"></span>
-                <div class="menu_button menu_button_icon" id="jai_next"><span>Next</span><i class="fa-solid fa-chevron-right"></i></div>
+                <div class="jai_btn" id="jai_next"><span>Next</span><i class="fa-solid fa-chevron-right"></i></div>
             </div>
         </div>`;
     document.body.appendChild(root);
@@ -659,24 +727,49 @@ function buildUi() {
     root.addEventListener('mousedown', (event) => event.target === root && closeBrowser());
     $('#jai_close').addEventListener('click', closeBrowser);
     $('#jai_account').addEventListener('click', () => showConnect());
-    $('#jai_go').addEventListener('click', submitSearch);
     $('#jai_search').addEventListener('keydown', (event) => event.key === 'Enter' && submitSearch());
-    for (const id of ['jai_sort', 'jai_mode', 'jai_tag']) {
-        $(`#${id}`).addEventListener('change', () => { readFilters(); state.page = 1; loadList(); });
-    }
+    $('#jai_tag').addEventListener('change', () => { state.tag = $('#jai_tag').value; state.page = 1; loadList(); });
+    $('#jai_sorts').addEventListener('click', (event) => {
+        const sort = event.target.closest('[data-sort]')?.dataset.sort;
+        if (!sort || state.loading) return;
+        state.sort = sort;
+        state.page = 1;
+        loadList();
+    });
+    $('#jai_modes').addEventListener('click', (event) => {
+        const mode = event.target.closest('[data-mode]')?.dataset.mode;
+        if (!mode || state.loading) return;
+        state.mode = mode;
+        state.page = 1;
+        loadList();
+    });
     $('#jai_prev').addEventListener('click', () => { if (state.page > 1 && !state.loading) { state.page--; loadList(); } });
     $('#jai_next').addEventListener('click', () => { if (hasNext() && !state.loading) { state.page++; loadList(); } });
-    $('#jai_grid').addEventListener('click', (event) => {
+
+    // Cards, creator names and tags are all clickable wherever they appear.
+    root.querySelector('.jai_body').addEventListener('click', (event) => {
+        if (event.target.closest('#jai_message')) return;
+        const creator = event.target.closest('[data-creator]');
+        if (creator) return openCreator(creator.dataset.creator, creator.dataset.name);
+        const tag = event.target.closest('[data-tag]');
+        if (tag) return filterBy({ tag: tag.dataset.tag });
+        const customTag = event.target.closest('[data-ctag]');
+        if (customTag) return filterBy({ customTag: customTag.dataset.ctag });
+        const clear = event.target.closest('[data-clear]')?.dataset.clear;
+        if (clear) return clearFilter(clear);
+        if (event.target.closest('[data-more]')) return event.target.closest('.jai_about').classList.toggle('jai_expanded');
         const card = event.target.closest('.jai_card');
         if (card) openDetail(card.dataset.id);
     });
+
     // If an avatar doesn't load as a plain image, fetch it ourselves and show it from memory.
     root.addEventListener('error', async (event) => {
         const img = event.target;
-        if (!(img instanceof HTMLImageElement) || img.dataset.jaiRetried || !img.src.startsWith(AVATARS)) return;
+        if (!(img instanceof HTMLImageElement) || img.dataset.jaiRetried || !/^https:\/\/([a-z0-9-]+\.)*janitorai\.com\//i.test(img.src)) return;
         img.dataset.jaiRetried = '1';
         const blob = await fetchImage(img.src);
         if (blob) img.src = URL.createObjectURL(blob);
+        else img.classList.add('jai_broken');
     }, true);
     $('#jai_message').addEventListener('click', (event) => {
         const action = event.target.closest('[data-jai]')?.dataset.jai;
@@ -693,28 +786,64 @@ function buildUi() {
 const openSite = () => window.open(SITE, 'jai_site');
 const hasNext = () => state.size > 0 && state.page * state.size < state.total;
 
-function readFilters() {
-    state.sort = $('#jai_sort').value;
-    state.mode = $('#jai_mode').value;
-    state.tag = $('#jai_tag').value;
-}
-
 function submitSearch() {
     const text = $('#jai_search').value.trim();
     const id = /janitorai\.com\/characters\//i.test(text) || /^[0-9a-f-]{36}$/i.test(text) ? text.match(UUID)?.[0] : null;
+    if (id || /janitorai\.com\/profiles\//i.test(text)) $('#jai_search').value = state.search;
     if (id) return openDetail(id);
-    readFilters();
+    const profile = /janitorai\.com\/profiles\//i.test(text) ? text.match(UUID)?.[0] : null;
+    if (profile) return openCreator(profile, '');
+    if (text && !state.search) state.sort = 'relevance';
+    if (!text && state.sort === 'relevance') state.sort = 'popular';
     state.search = text;
     state.page = 1;
     loadList();
 }
 
+function filterBy({ tag, customTag }) {
+    if (tag !== undefined) state.tag = String(tag);
+    if (customTag !== undefined) state.customTag = customTag;
+    state.page = 1;
+    loadList();
+}
+
+function clearFilter(which) {
+    if (which === 'creator') {
+        state.creator = null;
+        state.sort = 'popular';
+    }
+    if (which === 'customTag') state.customTag = '';
+    if (which === 'tag') state.tag = '';
+    if (which === 'search') {
+        state.search = '';
+        $('#jai_search').value = '';
+        if (state.sort === 'relevance') state.sort = 'popular';
+    }
+    state.page = 1;
+    loadList();
+}
+
+/** Shows everything one creator has published. */
+function openCreator(id, name) {
+    state.creator = { id, name: name || '', profile: null };
+    state.sort = 'latest';
+    state.search = '';
+    state.tag = '';
+    state.customTag = '';
+    state.page = 1;
+    $('#jai_search').value = '';
+    loadList();
+    loadCreator(id);
+}
+
 function resume() {
     if (state.detail) return openDetail(state.detail);
     if (!signedIn()) {
-        // Anonymous visitors can only see the unfiltered first page, so go back to it.
+        // Anonymous visitors can only see the first page without a search, so go back to it.
         state.page = 1;
         state.search = '';
+        state.customTag = '';
+        if (state.sort === 'relevance') state.sort = 'popular';
         $('#jai_search').value = '';
     }
     return loadList();
@@ -760,13 +889,12 @@ function showMessage(html) {
     box.style.display = html ? '' : 'none';
 }
 
-const button = (action, icon, label) => `<div class="menu_button menu_button_icon" data-jai="${action}"><i class="fa-solid ${icon}"></i><span>${label}</span></div>`;
+const button = (action, icon, label) => `<div class="jai_btn" data-jai="${action}"><i class="fa-solid ${icon}"></i><span>${label}</span></div>`;
 const actions = (...buttons) => `<div class="jai_actions">${buttons.join('')}</div>`;
 
 /** Hides the list / detail without forgetting what the user was looking at. */
 function hideViews() {
-    $('#jai_grid').style.display = 'none';
-    $('#jai_detail').style.display = 'none';
+    for (const id of ['jai_grid', 'jai_detail', 'jai_creator', 'jai_filters']) $(`#${id}`).style.display = 'none';
     root.querySelector('.jai_footer').style.display = 'none';
 }
 
@@ -886,9 +1014,29 @@ function showError(error) {
 
 function setView(view) {
     $('#jai_grid').style.display = view === 'grid' ? '' : 'none';
+    $('#jai_creator').style.display = view === 'grid' && state.creator ? '' : 'none';
+    $('#jai_filters').style.display = view === 'grid' ? '' : 'none';
     $('#jai_detail').style.display = view === 'detail' ? '' : 'none';
     root.querySelector('.jai_footer').style.display = view === 'grid' ? '' : 'none';
     if (view !== 'detail') state.detail = null;
+}
+
+/** Highlights the active tabs and lists the active filters as removable chips. */
+function renderControls() {
+    root.querySelectorAll('#jai_sorts .jai_tab').forEach((tab) => {
+        tab.classList.toggle('jai_active', tab.dataset.sort === state.sort);
+        if (tab.dataset.sort === 'relevance') tab.style.display = state.search ? '' : 'none';
+    });
+    root.querySelectorAll('#jai_modes .jai_tab').forEach(tab => tab.classList.toggle('jai_active', tab.dataset.mode === state.mode));
+    $('#jai_tag').value = state.tag;
+
+    const chip = (which, icon, label) => `<span class="jai_filter"><i class="fa-solid ${icon}"></i> ${esc(label)} <i class="fa-solid fa-xmark" data-clear="${which}" title="Remove this filter"></i></span>`;
+    const chips = [];
+    if (state.creator) chips.push(chip('creator', 'fa-user', `@${state.creator.name || 'creator'}`));
+    if (state.search) chips.push(chip('search', 'fa-magnifying-glass', state.search));
+    if (state.tag) chips.push(chip('tag', 'fa-tag', $('#jai_tag').selectedOptions[0]?.textContent || 'tag'));
+    if (state.customTag) chips.push(chip('customTag', 'fa-hashtag', state.customTag));
+    $('#jai_filters').innerHTML = chips.join('');
 }
 
 async function loadTags() {
@@ -904,6 +1052,7 @@ async function loadTags() {
             select.appendChild(option);
         });
         state.tagsLoaded = true;
+        renderControls();
     } catch (error) {
         console.warn(TAG, 'Could not load tags', error);
     }
@@ -911,6 +1060,7 @@ async function loadTags() {
 
 async function loadList() {
     setView('grid');
+    renderControls();
     state.loading = true;
     showMessage('<i class="fa-solid fa-spinner fa-spin"></i> Loading…');
     $('#jai_grid').innerHTML = '';
@@ -919,12 +1069,18 @@ async function loadList() {
         if (state.search) query.set('search', state.search);
         let path = `/hampter/characters?${query}`;
         if (state.tag) path += `&tag_id[]=${encodeURIComponent(state.tag)}`;
+        if (state.customTag) path += `&custom_tags[]=${encodeURIComponent(state.customTag)}`;
+        if (state.creator) path += `&user_id[]=${encodeURIComponent(state.creator.id)}`;
 
         const result = await api(path);
         const items = Array.isArray(result?.data) ? result.data : [];
         state.total = Number(result?.total) || items.length;
         state.size = Number(result?.size) || items.length;
 
+        if (state.creator && !state.creator.name && items[0]?.creator_name) {
+            state.creator.name = items[0].creator_name;
+            renderControls();
+        }
         $('#jai_grid').innerHTML = items.map(renderCard).join('');
         root.querySelector('.jai_body').scrollTop = 0;
         showMessage(items.length ? '' : 'No characters found.');
@@ -934,26 +1090,70 @@ async function loadList() {
     } finally {
         state.loading = false;
         updateStatus();
-        $('#jai_page').textContent = `Page ${state.page}`;
-        $('#jai_prev').classList.toggle('disabled', state.page <= 1);
-        $('#jai_next').classList.toggle('disabled', !hasNext());
+        const pages = state.size ? Math.ceil(Math.min(state.total, 10000) / state.size) : 0;
+        $('#jai_page').textContent = pages > 1 ? `Page ${state.page} of ${compact(pages)}` : `Page ${state.page}`;
+        $('#jai_prev').classList.toggle('jai_disabled', state.page <= 1);
+        $('#jai_next').classList.toggle('jai_disabled', !hasNext());
     }
 }
 
 function renderCard(item) {
-    const tags = (Array.isArray(item.tags) ? item.tags : []).slice(0, 4).map(t => `<span>${esc(t.name)}</span>`).join('');
-    const blurb = sanitize(item.description).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 160);
+    const updated = item.updated_at || item.first_published_at || item.created_at;
+    const chats = item.public_chat_count ? `<i class="fa-regular fa-file-lines"></i> ${compact(item.public_chat_count)}` : '';
     return `
-        <div class="jai_card" data-id="${esc(item.id)}" title="${esc(item.name)}">
+        <div class="jai_card" data-id="${esc(item.id)}">
+            <div class="jai_card_title" title="${esc(item.name)}">${esc(item.name)}</div>
             <div class="jai_thumb">
                 ${item.avatar ? `<img loading="lazy" referrerpolicy="no-referrer" src="${esc(avatarUrl(item.avatar, 400))}" alt="">` : ''}
-                ${item.is_nsfw ? '<span class="jai_badge">NSFW</span>' : ''}
+                <span class="jai_stats" title="${esc(`${compact(item.stats?.message)} messages · ${compact(item.stats?.chat)} chats`)}"><i class="fa-regular fa-comments"></i> ${compact(item.stats?.message)} ${chats}</span>
             </div>
-            <div class="jai_card_name">${esc(item.name)}</div>
-            <div class="jai_card_meta">@${esc(item.creator_name)} · ${compact(item.total_tokens)} tokens · <i class="fa-solid fa-comments"></i> ${compact(item.stats?.chat)}</div>
-            <div class="jai_card_blurb">${esc(blurb)}</div>
-            <div class="jai_tags">${tags}</div>
+            <div class="jai_card_body">
+                <span class="jai_creator_link" data-creator="${esc(item.creator_id)}" data-name="${esc(item.creator_name)}" title="Show all characters by this creator">@${esc(item.creator_name)}${verifiedBadge(item.creator_verified)}</span>
+                <div class="jai_blurb">${richHtml(item.description, true)}</div>
+            </div>
+            <div class="jai_spark"></div>
+            <div class="jai_tags">${tagChips(item)}</div>
+            <div class="jai_card_foot">
+                <span>${compact(item.total_tokens)} tokens</span>
+                ${updated ? `<span title="Last updated ${esc(fullDate(updated))}"><i class="fa-regular fa-clock"></i> ${esc(timeAgo(updated))}</span>` : ''}
+            </div>
         </div>`;
+}
+
+/** Fills the banner above a creator's characters. */
+async function loadCreator(id) {
+    const box = $('#jai_creator');
+    box.innerHTML = '';
+    let profile;
+    try {
+        profile = await api(`/hampter/profiles/${encodeURIComponent(id)}`);
+    } catch (error) {
+        console.warn(TAG, 'Could not load creator profile', error);
+        return;
+    }
+    if (state.creator?.id !== id) return;
+    state.creator.profile = profile;
+    if (profile.user_name) state.creator.name = profile.user_name;
+    renderControls();
+
+    const avatar = str(profile.avatar);
+    const avatarSrc = /^https?:\/\//i.test(avatar) ? avatar : (avatar ? `https://ella.janitorai.com/avatars/${encodeURIComponent(avatar)}?width=200` : '');
+    const about = richHtml(profile.about_me);
+    box.innerHTML = `
+        <div class="jai_creator_head">
+            ${avatarSrc ? `<img referrerpolicy="no-referrer" src="${esc(avatarSrc)}" alt="">` : ''}
+            <div>
+                <div class="jai_creator_name">@${esc(profile.user_name || state.creator.name)}${verifiedBadge(profile.is_verified)}</div>
+                <div class="jai_creator_meta">
+                    <span><i class="fa-solid fa-user-group"></i> ${compact(Number(profile.followers_count))} followers</span>
+                    ${state.total ? `<span><i class="fa-solid fa-masks-theater"></i> ${compact(state.total)} characters</span>` : ''}
+                    ${profile.created_at ? `<span><i class="fa-regular fa-calendar"></i> Member since ${esc(fullDate(profile.created_at))}</span>` : ''}
+                    <a href="${SITE}/profiles/${esc(id)}" target="_blank" rel="noopener"><i class="fa-solid fa-up-right-from-square"></i> View on JanitorAI</a>
+                </div>
+            </div>
+        </div>
+        ${about.replace(/<[^>]+>/g, '').trim() ? `<div class="jai_about"><div class="jai_about_text jai_rich">${about}</div><span class="jai_link" data-more>Show more / less</span></div>` : ''}`;
+    if (!state.detail) box.style.display = '';
 }
 
 async function openDetail(id) {
@@ -983,26 +1183,45 @@ async function openDetail(id) {
     if (scripts.advanced.length) bookFact += ` · ${scripts.advanced.length} code script${scripts.advanced.length > 1 ? 's' : ''} (not supported)`;
     const scriptNames = scripts.all.map((script, i) => scriptTitle(script, i)).join(', ');
     const defined = hasDefinition(detail);
-    const tokens = detail.token_counts?.total_tokens;
-    const tags = [
-        ...(Array.isArray(detail.tags) ? detail.tags.map(t => t.name) : []),
-        ...(Array.isArray(detail.custom_tags) ? detail.custom_tags.map(t => `#${t}`) : []),
-    ].map(t => `<span>${esc(t)}</span>`).join('');
+    const counts = detail.token_counts || {};
+    const tokens = counts.total_tokens;
+    const breakdown = [
+        ['Personality', counts.personality_tokens],
+        ['Scenario', counts.scenario_tokens],
+        ['First message', counts.first_message_tokens],
+        ['Examples', counts.example_dialog_tokens],
+    ].filter(([, n]) => Number(n) > 0).map(([label, n]) => `${label} ${compact(n)}`).join(' · ');
+    const published = detail.first_published_at || detail.created_at;
+    const greetingCount = [detail.first_message, ...(Array.isArray(detail.first_messages) ? detail.first_messages : [])].map(str).filter(g => g.trim()).length;
 
     box.innerHTML = `
         <div class="jai_detail_side">
             ${detail.avatar ? `<img referrerpolicy="no-referrer" src="${esc(avatarUrl(detail.avatar, 600))}" alt="">` : ''}
-            <div class="menu_button menu_button_icon jai_import"><i class="fa-solid fa-file-import"></i><span>Import to SillyTavern</span></div>
-            ${scripts.shared.length ? '<div class="menu_button menu_button_icon jai_book_only" title="Save only the lorebook as a World Info file, without importing the character"><i class="fa-solid fa-book-atlas"></i><span>Lorebook only</span></div>' : ''}
-            <div class="menu_button menu_button_icon jai_back"><i class="fa-solid fa-arrow-left"></i><span>Back to list</span></div>
-            <a class="menu_button menu_button_icon" href="${SITE}/characters/${esc(detail.id)}" target="_blank" rel="noopener"><i class="fa-solid fa-up-right-from-square"></i><span>View on JanitorAI</span></a>
-            <div class="menu_button menu_button_icon jai_raw" title="Copy the raw data JanitorAI sent for this character (useful for bug reports)"><i class="fa-solid fa-copy"></i><span>Copy raw data</span></div>
+            <div class="jai_btn jai_primary jai_import"><i class="fa-solid fa-file-import"></i><span>Import to SillyTavern</span></div>
+            ${scripts.shared.length ? '<div class="jai_btn jai_book_only" title="Save only the lorebook as a World Info file, without importing the character"><i class="fa-solid fa-book-atlas"></i><span>Lorebook only</span></div>' : ''}
+            <div class="jai_btn jai_back"><i class="fa-solid fa-arrow-left"></i><span>Back to list</span></div>
+            <a class="jai_btn" href="${SITE}/characters/${esc(detail.id)}" target="_blank" rel="noopener"><i class="fa-solid fa-up-right-from-square"></i><span>View on JanitorAI</span></a>
+            <div class="jai_btn jai_raw" title="Copy the raw data JanitorAI sent for this character (useful for bug reports)"><i class="fa-solid fa-copy"></i><span>Copy raw data</span></div>
         </div>
         <div class="jai_detail_main">
-            <h2>${esc(detail.name)}</h2>
-            <div class="jai_card_meta">by @${esc(detail.creator_name)}${detail.chat_name ? ` · chat name: ${esc(detail.chat_name)}` : ''} · <i class="fa-solid fa-comments"></i> ${compact(detail.stats?.chat)} chats</div>
+            <h2 class="jai_detail_title">${esc(detail.name)}</h2>
+            <div class="jai_detail_by">
+                <span class="jai_creator_link" data-creator="${esc(detail.creator_id)}" data-name="${esc(detail.creator_name)}" title="Show all characters by this creator">@${esc(detail.creator_name)}${verifiedBadge(detail.creator_verified)}</span>
+                ${detail.chat_name ? `<span>chat name: <b>${esc(detail.chat_name)}</b></span>` : ''}
+            </div>
+            <div class="jai_statline">
+                <span title="Messages sent to this character"><i class="fa-regular fa-comments"></i> ${compact(detail.stats?.message)} messages</span>
+                <span title="Chats started"><i class="fa-regular fa-message"></i> ${compact(detail.stats?.chat)} chats</span>
+                ${tokens ? `<span title="${esc(breakdown || 'Permanent tokens')}"><i class="fa-solid fa-coins"></i> ${compact(tokens)} tokens</span>` : ''}
+                ${greetingCount ? `<span><i class="fa-regular fa-hand"></i> ${greetingCount} greeting${greetingCount > 1 ? 's' : ''}</span>` : ''}
+            </div>
+            <div class="jai_dates">
+                ${published ? `<span><i class="fa-regular fa-calendar-plus"></i> Created ${esc(fullDate(published))}</span>` : ''}
+                ${detail.updated_at ? `<span><i class="fa-regular fa-clock"></i> Updated ${esc(fullDate(detail.updated_at))} (${esc(timeAgo(detail.updated_at))})</span>` : ''}
+            </div>
+            ${breakdown ? `<div class="jai_breakdown">${esc(breakdown)}</div>` : ''}
             <div class="jai_facts">
-                <span class="${defined ? 'jai_ok' : 'jai_bad'}"><i class="fa-solid ${defined ? 'fa-check' : 'fa-lock'}"></i> ${defined ? `Definition available${tokens ? ` (${compact(tokens)} tokens)` : ''}` : (signedIn() ? 'Definition hidden by the creator (greetings only)' : 'Definition needs a connected account')}</span>
+                <span class="${defined ? 'jai_ok' : 'jai_bad'}"><i class="fa-solid ${defined ? 'fa-check' : 'fa-lock'}"></i> ${defined ? 'Definition available' : (signedIn() ? 'Definition hidden by the creator (greetings only)' : 'Definition needs a connected account')}</span>
                 <span class="${scripts.shared.length ? 'jai_ok' : (scripts.private.length ? 'jai_bad' : '')}" title="${esc(scriptNames)}"><i class="fa-solid fa-book-atlas"></i> ${esc(bookFact)}</span>
                 ${signedIn() ? '' : '<span class="jai_link" data-jai-connect><i class="fa-solid fa-key"></i> Connect account</span>'}
             </div>
@@ -1010,19 +1229,17 @@ async function openDetail(id) {
             <div class="jai_outside">
                 <b>Definition hidden on JanitorAI.</b> JannyAI may have its own copy (possibly older). If it does, it can be combined with the greetings, avatar and lorebook from here:
                 <div class="jai_actions">
-                    <div class="menu_button menu_button_icon jai_janny_auto"><i class="fa-solid fa-wand-magic-sparkles"></i><span>Try to fetch it</span></div>
-                    <a class="menu_button menu_button_icon" href="${JANNY}${esc(detail.id)}" target="_blank" rel="noopener"><i class="fa-solid fa-up-right-from-square"></i><span>Open on JannyAI</span></a>
-                    <div class="menu_button menu_button_icon jai_janny_file"><i class="fa-solid fa-file-arrow-up"></i><span>Use downloaded card…</span></div>
+                    <div class="jai_btn jai_janny_auto"><i class="fa-solid fa-wand-magic-sparkles"></i><span>Try to fetch it</span></div>
+                    <a class="jai_btn" href="${JANNY}${esc(detail.id)}" target="_blank" rel="noopener"><i class="fa-solid fa-up-right-from-square"></i><span>Open on JannyAI</span></a>
+                    <div class="jai_btn jai_janny_file"><i class="fa-solid fa-file-arrow-up"></i><span>Use downloaded card…</span></div>
                 </div>
                 <input type="file" class="jai_janny_input" accept=".png,.json,image/png,application/json" hidden>
                 <div class="jai_note jai_janny_note">If fetching fails: open the JannyAI page, download the card there, then pick that file with "Use downloaded card".</div>
             </div>` : ''}
-            <div class="jai_tags">${tags}</div>
-            <div class="jai_description">${sanitize(detail.description)}</div>
+            <div class="jai_tags">${tagChips(detail)}</div>
+            <div class="jai_description jai_rich">${richHtml(detail.description)}</div>
         </div>`;
 
-    box.querySelectorAll('.jai_description a').forEach((a) => { a.target = '_blank'; a.rel = 'noopener noreferrer'; });
-    box.querySelectorAll('.jai_description img').forEach((img) => { img.referrerPolicy = 'no-referrer'; img.loading = 'lazy'; });
     box.querySelector('[data-jai-connect]')?.addEventListener('click', () => showConnect());
     box.querySelector('.jai_back').addEventListener('click', () => ($('#jai_grid').children.length ? (setView('grid'), showMessage('')) : loadList()));
     box.querySelector('.jai_raw').addEventListener('click', async () => {
@@ -1053,10 +1270,10 @@ async function openDetail(id) {
     };
     const autoButton = box.querySelector('.jai_janny_auto');
     autoButton?.addEventListener('click', async () => {
-        if (autoButton.classList.contains('disabled')) return;
-        autoButton.classList.add('disabled');
+        if (autoButton.classList.contains('jai_disabled')) return;
+        autoButton.classList.add('jai_disabled');
         await useOutside(() => fetchJannyCopy(detail.id));
-        autoButton.classList.remove('disabled');
+        autoButton.classList.remove('jai_disabled');
     });
     const fileInput = box.querySelector('.jai_janny_input');
     box.querySelector('.jai_janny_file')?.addEventListener('click', () => fileInput.click());
@@ -1068,22 +1285,22 @@ async function openDetail(id) {
 
     const bookButton = box.querySelector('.jai_book_only');
     bookButton?.addEventListener('click', async () => {
-        if (bookButton.classList.contains('disabled')) return;
-        bookButton.classList.add('disabled');
+        if (bookButton.classList.contains('jai_disabled')) return;
+        bookButton.classList.add('jai_disabled');
         try {
             await importLorebookOnly(detail);
         } catch (error) {
             console.error(TAG, 'Lorebook import failed', error);
             toastr.error(String(error?.message || error), 'Janitor Importer: lorebook import failed');
         } finally {
-            bookButton.classList.remove('disabled');
+            bookButton.classList.remove('jai_disabled');
         }
     });
 
     const importButton = box.querySelector('.jai_import');
     importButton.addEventListener('click', async () => {
-        if (importButton.classList.contains('disabled')) return;
-        importButton.classList.add('disabled');
+        if (importButton.classList.contains('jai_disabled')) return;
+        importButton.classList.add('jai_disabled');
         importButton.querySelector('span').textContent = 'Importing…';
         try {
             if (await importCharacter(outside ? withOutsideDefinition(detail, outside) : detail)) closeBrowser();
@@ -1091,7 +1308,7 @@ async function openDetail(id) {
             console.error(TAG, 'Import failed', error);
             toastr.error(String(error?.message || error), 'Janitor Importer: import failed');
         } finally {
-            importButton.classList.remove('disabled');
+            importButton.classList.remove('jai_disabled');
             importButton.querySelector('span').textContent = 'Import to SillyTavern';
         }
     });
