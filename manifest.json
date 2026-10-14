@@ -1,0 +1,12 @@
+{
+    "display_name": "Janitor Importer",
+    "loading_order": 100,
+    "requires": [],
+    "optional": [],
+    "js": "index.js",
+    "css": "style.css",
+    "author": "brabro1",
+    "version": "1.2.1",
+    "homePage": "https://github.com/brabro1/SillyTavern-Janitor-Importer",
+    "auto_update": false
+}
