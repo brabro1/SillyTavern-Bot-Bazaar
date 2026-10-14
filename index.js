@@ -302,10 +302,45 @@ function sortScripts(detail) {
  * as a JSON string in "script", and only when the creator made the lorebook public.
  * @returns {Promise<{book: object|null, warnings: string[], scriptCount: number}>}
  */
+const scriptCache = new Map();
+
+/**
+ * Fetches one lorebook. A lorebook can be attached publicly while its contents stay private
+ * (is_code_public: false) — JanitorAI then sends no entries at all.
+ * @returns {Promise<{status: 'ok'|'private'|'unreadable', entries?: object[], settings?: object}>}
+ */
+async function fetchScript(id) {
+    if (scriptCache.has(id)) return scriptCache.get(id);
+    let result;
+    try {
+        const full = await api(`/hampter/script/${encodeURIComponent(id)}`);
+        const entries = findEntries(full?.script ?? null);
+        const settings = tryJson(full?.settings);
+        if (entries?.length) result = { status: 'ok', entries, settings: settings && typeof settings === 'object' ? settings : {} };
+        else result = { status: full?.is_code_public === false || full?.script == null ? 'private' : 'unreadable' };
+    } catch (error) {
+        if (error.code === 'auth') throw error;
+        console.warn(TAG, 'Could not fetch script', id, error);
+        result = { status: error.status === 404 ? 'private' : 'unreadable' };
+    }
+    scriptCache.set(id, result);
+    return result;
+}
+
+const nameList = (names) => names.map(n => `"${n}"`).join(', ');
+
+/**
+ * Collects every readable lorebook attached to a JanitorAI character into one V2 character_book.
+ * A character lists its scripts as { id, title, type, is_public }; the entries live at /hampter/script/<id>
+ * as a JSON string in "script", and only when the creator made the contents public.
+ * @returns {Promise<{book: object|null, warnings: string[], scriptCount: number}>}
+ */
 async function buildLorebook(detail, bookName) {
-    const warnings = [];
     const scripts = sortScripts(detail).all;
     const entries = [];
+    const hidden = [];
+    const unreadable = [];
+    const code = [];
 
     for (const [i, raw] of scripts.entries()) {
         const script = tryJson(raw);
@@ -313,34 +348,37 @@ async function buildLorebook(detail, bookName) {
         const label = scriptTitle(script, i);
 
         if (script?.type === 'advanced') {
-            warnings.push(`"${label}" is an advanced (code) script. SillyTavern can't run those, so it was skipped.`);
+            code.push(label);
             continue;
         }
 
-        let found = findEntries(script);
-        let defaults = {};
-        if (!found && id && UUID.test(String(id))) {
-            try {
-                const full = await api(`/hampter/script/${encodeURIComponent(id)}`);
-                found = findEntries(full?.script ?? full);
-                const bookSettings = tryJson(full?.settings);
-                if (bookSettings && typeof bookSettings === 'object') defaults = bookSettings;
-            } catch (error) {
-                console.warn(TAG, 'Could not fetch script', id, error);
-                if (error.status === 404 || script?.is_public === false) {
-                    warnings.push(`"${label}" is a private lorebook — its creator has not shared the contents, so it can't be imported.`);
-                    continue;
-                }
-                if (error.code === 'auth') throw error;
-            }
+        const inline = findEntries(script);
+        if (inline?.length) {
+            inline.forEach(entry => entries.push(convertEntry(entry, entries.length)));
+            continue;
+        }
+        if (!id || !UUID.test(String(id))) {
+            unreadable.push(label);
+            continue;
+        }
+        if (script?.is_public === false) {
+            hidden.push(label);
+            continue;
         }
 
-        if (found?.length) {
-            found.forEach(entry => entries.push(convertEntry(entry, entries.length, defaults)));
-        } else {
-            warnings.push(`The lorebook "${label}" could not be read.`);
-        }
+        const result = await fetchScript(String(id));
+        if (result.status === 'ok') result.entries.forEach(entry => entries.push(convertEntry(entry, entries.length, result.settings)));
+        else (result.status === 'private' ? hidden : unreadable).push(label);
     }
+
+    const warnings = [];
+    if (hidden.length) {
+        warnings.push(hidden.length === 1
+            ? `The creator keeps the contents of the lorebook ${nameList(hidden)} private, so it can't be imported.`
+            : `The creator keeps the contents of ${hidden.length} lorebooks private, so they can't be imported: ${nameList(hidden)}.`);
+    }
+    if (unreadable.length) warnings.push(`Could not read ${unreadable.length === 1 ? 'the lorebook' : 'these lorebooks'}: ${nameList(unreadable)}.`);
+    if (code.length) warnings.push(`Skipped ${code.length === 1 ? 'a code script' : 'code scripts'} SillyTavern can't run: ${nameList(code)}.`);
 
     if (!entries.length) return { book: null, warnings, scriptCount: scripts.length };
     return {
@@ -598,8 +636,8 @@ async function importLorebookOnly(detail) {
     const name = safeName(detail.chat_name) || safeName(detail.name) || 'Janitor character';
     const bookName = `${name} (Janitor Lorebook)`;
     const { book, warnings } = await buildLorebook(detail, bookName);
-    warnings.forEach(w => toastr.warning(w, 'Janitor Importer', { timeOut: 10000 }));
-    if (!book) return;
+    warnings.forEach(w => toastr.warning(w, 'Janitor Importer', { timeOut: 12000 }));
+    if (!book) return toastr.info('No lorebook entries could be imported for this character.', 'Janitor Importer');
 
     await saveWorldInfo(bookName, convertCharacterBook(structuredClone(book)), true);
     await updateWorldInfoList();
@@ -1222,7 +1260,7 @@ async function openDetail(id) {
             ${breakdown ? `<div class="jai_breakdown">${esc(breakdown)}</div>` : ''}
             <div class="jai_facts">
                 <span class="${defined ? 'jai_ok' : 'jai_bad'}"><i class="fa-solid ${defined ? 'fa-check' : 'fa-lock'}"></i> ${defined ? 'Definition available' : (signedIn() ? 'Definition hidden by the creator (greetings only)' : 'Definition needs a connected account')}</span>
-                <span class="${scripts.shared.length ? 'jai_ok' : (scripts.private.length ? 'jai_bad' : '')}" title="${esc(scriptNames)}"><i class="fa-solid fa-book-atlas"></i> ${esc(bookFact)}</span>
+                <span class="jai_bookfact ${scripts.shared.length ? '' : (scripts.private.length ? 'jai_bad' : '')}" title="${esc(scriptNames)}"><i class="fa-solid fa-book-atlas"></i> ${scripts.shared.length ? '<i class="fa-solid fa-spinner fa-spin"></i> Checking lorebooks…' : esc(bookFact)}</span>
                 ${signedIn() ? '' : '<span class="jai_link" data-jai-connect><i class="fa-solid fa-key"></i> Connect account</span>'}
             </div>
             ${!defined && signedIn() ? `
@@ -1282,6 +1320,34 @@ async function openDetail(id) {
         fileInput.value = '';
         if (file) await useOutside(() => readCardFile(file));
     });
+
+    // Attached lorebooks may still keep their contents private; check each one before promising anything.
+    if (scripts.shared.length) {
+        (async () => {
+            const results = [];
+            for (const script of scripts.shared) {
+                try {
+                    results.push({ title: script.title, ...(await fetchScript(String(script.id))) });
+                } catch {
+                    results.push({ title: script.title, status: 'unreadable' });
+                }
+                if (state.detail !== id) return;
+            }
+            const readable = results.filter(r => r.status === 'ok');
+            const closed = results.filter(r => r.status !== 'ok').length + scripts.private.length;
+            const total = readable.reduce((sum, r) => sum + r.entries.length, 0);
+            const fact = box.querySelector('.jai_bookfact');
+            if (!fact) return;
+            let text = readable.length
+                ? `${readable.length} lorebook${readable.length > 1 ? 's' : ''} (${total} entries) will be imported`
+                : 'Lorebook contents kept private by the creator';
+            if (readable.length && closed) text += ` · ${closed} more kept private by the creator`;
+            if (scripts.advanced.length) text += ` · ${scripts.advanced.length} code script${scripts.advanced.length > 1 ? 's' : ''} (not supported)`;
+            fact.className = `jai_bookfact ${readable.length ? 'jai_ok' : 'jai_bad'}`;
+            fact.innerHTML = `<i class="fa-solid fa-book-atlas"></i> ${esc(text)}`;
+            if (!readable.length) box.querySelector('.jai_book_only')?.remove();
+        })();
+    }
 
     const bookButton = box.querySelector('.jai_book_only');
     bookButton?.addEventListener('click', async () => {
