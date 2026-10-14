@@ -1794,3 +1794,456 @@
         font-size: 12px;
     }
 }
+
+/* =================================================================================================
+   Favorites theme: warm night, gold accents, a wall of portrait posters.
+   ================================================================================================= */
+
+#jai_browser.jai_theme_fav {
+    --jai-bg: #17120b;
+    --jai-panel: #100c07;
+    --jai-line: #4a3716;
+    --jai-pink: #fcd34d;
+    --jai-violet: #fbbf24;
+    --jai-lavender: #e7d7b5;
+    --jai-dim: rgba(231, 215, 181, 0.6);
+    --jai-title-font: Georgia, "Times New Roman", serif;
+}
+
+#jai_browser.jai_theme_fav .jai_window {
+    border-color: #4a3716;
+    background: radial-gradient(900px 500px at 15% -10%, rgba(251, 191, 36, 0.14), transparent 60%), var(--jai-bg);
+}
+
+#jai_browser.jai_theme_fav .jai_title,
+#jai_browser.jai_theme_fav .jai_tab.jai_active {
+    color: #fcd34d;
+}
+
+#jai_browser.jai_theme_fav .jai_tab.jai_active {
+    background: rgba(251, 191, 36, 0.18);
+}
+
+#jai_browser.jai_theme_fav .jai_btn {
+    border-color: #5a431b;
+    background: rgba(90, 67, 27, 0.35);
+}
+
+#jai_browser.jai_theme_fav .jai_btn:hover {
+    border-color: #fbbf24;
+    background: rgba(251, 191, 36, 0.2);
+}
+
+#jai_browser .jai_favhead,
+#jai_browser .jai_libhead {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px 16px;
+}
+
+#jai_browser .jai_favtitle {
+    font-family: Georgia, "Times New Roman", serif;
+    font-size: 26px;
+    color: #fcd34d;
+    margin-right: auto;
+}
+
+#jai_browser .jai_favtitle span,
+#jai_browser .jai_libtitle span {
+    font-family: inherit;
+    font-size: 13px;
+    color: var(--jai-dim);
+    margin-left: 6px;
+}
+
+#jai_browser .jai_segs {
+    display: inline-flex;
+    padding: 3px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.06);
+}
+
+#jai_browser .jai_seg {
+    padding: 5px 12px;
+    border-radius: 999px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--jai-dim);
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+#jai_browser .jai_seg i {
+    font-style: normal;
+    opacity: 0.7;
+    margin-left: 3px;
+}
+
+#jai_browser .jai_seg.jai_active {
+    background: var(--jai-violet);
+    color: #111;
+}
+
+#jai_browser.jai_theme_fav .jai_creator:not(:empty),
+#jai_browser.jai_theme_lib .jai_creator:not(:empty) {
+    padding: 4px 0 12px;
+    border: 0;
+    border-radius: 0;
+    background: none;
+}
+
+#jai_browser .jai_syncbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin-top: 10px;
+}
+
+#jai_browser .jai_pill {
+    padding: 4px 12px;
+    border-radius: 999px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    font-size: 12px;
+    color: var(--jai-dim);
+}
+
+#jai_browser .jai_pill b {
+    color: var(--jai-text);
+    margin-right: 4px;
+}
+
+#jai_browser .jai_pill_ok {
+    border-color: rgba(52, 211, 153, 0.4);
+}
+
+#jai_browser .jai_pill_ok i {
+    color: #34d399;
+}
+
+#jai_browser .jai_pill_bad {
+    border-color: rgba(248, 113, 113, 0.5);
+    color: #fca5a5;
+}
+
+#jai_browser.jai_theme_fav .jai_grid:has(> .jai_poster) {
+    grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+    gap: 14px;
+}
+
+#jai_browser .jai_poster {
+    position: relative;
+    aspect-ratio: 3 / 4;
+    border-radius: 14px;
+    overflow: hidden;
+    background: #0c0905;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+    cursor: pointer;
+    transition: transform 0.15s, box-shadow 0.15s;
+}
+
+#jai_browser .jai_poster:hover {
+    transform: translateY(-3px) rotate(-0.4deg);
+    box-shadow: 0 14px 34px rgba(251, 191, 36, 0.22);
+}
+
+#jai_browser .jai_poster img,
+#jai_browser .jai_poster_blank {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    object-position: top;
+}
+
+#jai_browser .jai_poster_blank {
+    display: grid;
+    place-items: center;
+    font-size: 40px;
+    color: rgba(255, 255, 255, 0.2);
+}
+
+#jai_browser .jai_poster_site {
+    position: absolute;
+    top: 8px;
+    left: 8px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 700;
+    backdrop-filter: blur(4px);
+}
+
+#jai_browser .jai_poster_star {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    display: grid;
+    place-items: center;
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    background: rgba(0, 0, 0, 0.5);
+    color: #fbbf24;
+    font-size: 15px;
+    cursor: pointer;
+}
+
+#jai_browser .jai_poster_star:hover {
+    color: #fff;
+    background: rgba(220, 38, 38, 0.7);
+}
+
+#jai_browser .jai_poster_info {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 34px 10px 10px;
+    background: linear-gradient(transparent, rgba(10, 7, 3, 0.92) 45%);
+}
+
+#jai_browser .jai_poster_name {
+    font-family: Georgia, "Times New Roman", serif;
+    font-size: 15px;
+    font-weight: 700;
+    line-height: 1.2;
+    color: #fff7e0;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+
+#jai_browser .jai_poster_info .jai_creator_link {
+    font-size: 12px;
+    color: #fbbf24;
+}
+
+#jai_browser .jai_poster_when {
+    font-size: 11px;
+    color: rgba(255, 247, 224, 0.55);
+}
+
+/* =================================================================================================
+   Library theme: calm slate and teal, a clean list with one row per character.
+   ================================================================================================= */
+
+#jai_browser.jai_theme_lib {
+    --jai-bg: #0e1416;
+    --jai-panel: #0a0f11;
+    --jai-line: #1f3a3c;
+    --jai-pink: #5eead4;
+    --jai-violet: #2dd4bf;
+    --jai-lavender: #c5d6d4;
+    --jai-dim: rgba(197, 214, 212, 0.6);
+    --jai-title-font: "Segoe UI", system-ui, sans-serif;
+}
+
+#jai_browser.jai_theme_lib .jai_window {
+    border-color: #1f3a3c;
+}
+
+#jai_browser.jai_theme_lib .jai_title {
+    color: #5eead4;
+}
+
+#jai_browser.jai_theme_lib .jai_tab.jai_active {
+    background: rgba(45, 212, 191, 0.2);
+    color: #5eead4;
+}
+
+#jai_browser.jai_theme_lib .jai_btn {
+    border-color: #24474a;
+    background: rgba(36, 71, 74, 0.4);
+}
+
+#jai_browser .jai_libtitle {
+    font-size: 22px;
+    font-weight: 700;
+    color: #5eead4;
+    margin-right: auto;
+}
+
+#jai_browser.jai_theme_lib .jai_lsort {
+    width: auto;
+    margin: 0;
+    padding: 5px 10px;
+    border: 1px solid #24474a;
+    border-radius: 999px;
+    background-color: #0a0f11;
+    font-size: 13px;
+}
+
+#jai_browser.jai_theme_lib .jai_grid {
+    display: block;
+}
+
+#jai_browser .jai_rows {
+    border: 1px solid var(--jai-line);
+    border-radius: 12px;
+    overflow: hidden;
+}
+
+#jai_browser .jai_row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 12px;
+    border-top: 1px solid rgba(255, 255, 255, 0.05);
+    transition: background 0.12s;
+}
+
+#jai_browser .jai_row:first-child {
+    border-top: 0;
+}
+
+#jai_browser .jai_row:hover {
+    background: rgba(45, 212, 191, 0.06);
+}
+
+#jai_browser .jai_row_avatar {
+    flex: none;
+    width: 46px;
+    height: 46px;
+    border-radius: 50%;
+    object-fit: cover;
+    object-position: top;
+    border: 2px solid #24474a;
+}
+
+#jai_browser .jai_row_main {
+    flex: 1;
+    min-width: 0;
+}
+
+#jai_browser .jai_row_name {
+    font-weight: 700;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+#jai_browser .jai_row_meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 2px 12px;
+    margin-top: 2px;
+    font-size: 12px;
+    color: var(--jai-dim);
+}
+
+#jai_browser .jai_row_book {
+    color: #5eead4;
+}
+
+#jai_browser .jai_row_actions {
+    display: flex;
+    gap: 6px;
+}
+
+#jai_browser .jai_iconbtn {
+    display: grid;
+    place-items: center;
+    width: 38px;
+    height: 38px;
+    border-radius: 10px;
+    border: 1px solid #24474a;
+    color: var(--jai-lavender);
+    cursor: pointer;
+    transition: background 0.12s, border-color 0.12s;
+}
+
+#jai_browser .jai_iconbtn:hover {
+    border-color: #2dd4bf;
+    background: rgba(45, 212, 191, 0.15);
+}
+
+#jai_browser .jai_iconbtn_main {
+    background: #0f766e;
+    border-color: #0f766e;
+    color: #fff;
+}
+
+#jai_browser .jai_iconbtn_danger:hover {
+    border-color: #f87171;
+    background: rgba(220, 38, 38, 0.3);
+    color: #fff;
+}
+
+/* ---------- accounts panel ---------- */
+
+#jai_browser .jai_acc_grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 12px;
+    margin: 10px 0 14px;
+}
+
+#jai_browser .jai_acc {
+    padding: 12px 14px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 12px;
+    background: rgba(0, 0, 0, 0.25);
+}
+
+#jai_browser .jai_acc_head {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 8px;
+    font-size: 15px;
+}
+
+#jai_browser .jai_acc_head span {
+    font-size: 12px;
+}
+
+#jai_browser .jai_steps {
+    margin: 6px 0 8px;
+    padding-left: 20px;
+}
+
+#jai_browser .jai_message details {
+    margin: 8px 0;
+}
+
+@media (max-width: 700px) {
+    #jai_browser .jai_favtitle {
+        font-size: 21px;
+    }
+
+    #jai_browser.jai_theme_fav .jai_grid:has(> .jai_poster) {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+    }
+
+    #jai_browser .jai_poster_name {
+        font-size: 13px;
+    }
+
+    #jai_browser .jai_row {
+        flex-wrap: wrap;
+        padding: 10px;
+    }
+
+    #jai_browser .jai_row_main {
+        flex-basis: calc(100% - 60px);
+    }
+
+    #jai_browser .jai_row_actions {
+        width: 100%;
+        justify-content: flex-end;
+    }
+
+    #jai_browser .jai_iconbtn {
+        width: 42px;
+        height: 40px;
+    }
+}

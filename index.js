@@ -977,21 +977,37 @@ async function toggleFavorite(item) {
     return index < 0;
 }
 
-/** Adds what a site lists as your favorites. Returns how many were new. */
-function mergeFavorites(items) {
+/**
+ * Makes the local list follow what a site lists as your favorites: new ones are added, and ones that came from
+ * that site but were un-favorited there are removed. Stars you set in Bot Bazaar yourself are never removed.
+ * Returns how many were added and removed.
+ */
+function mergeFavorites(site, items) {
+    const keys = new Set(items.map(item => favKey(item.source, item.id)));
+    const before = favorites.length;
+    favorites = favorites.filter(f => f.fromSite !== site || keys.has(f.key));
+    const removed = before - favorites.length;
     let added = 0;
+    let linked = 0;
     for (const item of items) {
         const key = favKey(item.source, item.id);
-        if (favorites.some(f => f.key === key)) continue;
-        favorites.push({ key, ...item, addedAt: new Date().toISOString() });
+        const existing = favorites.find(f => f.key === key);
+        if (existing) {
+            // Already here (starred in Bot Bazaar or from an older sync): from now on it follows the site.
+            if (!existing.fromSite) {
+                existing.fromSite = site;
+                linked++;
+            }
+            continue;
+        }
+        favorites.unshift({ key, ...item, fromSite: site, addedAt: new Date().toISOString() });
         added++;
     }
-    if (added) saveFavorites();
-    return added;
+    if (added || removed || linked) saveFavorites();
+    return { added, removed };
 }
 
-async function syncJanitorFavorites() {
-    if (!signedIn()) throw new ApiError('auth', 'Connect your JanitorAI account first.');
+async function fetchJanitorFavorites() {
     const items = [];
     for (let page = 1; page <= 30; page++) {
         const result = await api(`/hampter/characters?page=${page}&mode=all&sort=latest&favorites=true`);
@@ -999,11 +1015,10 @@ async function syncJanitorFavorites() {
         items.push(...data.map(c => ({ source: 'janitor', id: c.id, name: c.name, image: avatarUrl(c.avatar, 400), creator: c.creator_name, creatorId: c.creator_id, kind: 'character' })));
         if (data.length < (Number(result?.size) || 20) || !data.length) break;
     }
-    return { found: items.length, added: mergeFavorites(items) };
+    return items;
 }
 
-async function syncChubFavorites() {
-    if (!chubAccount().key) throw new ApiError('auth', 'Connect your Chub account first.');
+async function fetchChubFavorites() {
     const items = [];
     for (const namespace of ['characters', 'lorebooks']) {
         for (let page = 1; page <= 30; page++) {
@@ -1016,7 +1031,76 @@ async function syncChubFavorites() {
             if (nodes.length < 48) break;
         }
     }
-    return { found: items.length, added: mergeFavorites(items) };
+    return items;
+}
+
+// ---- automatic sync: whenever the Favorites tab is open, and every few minutes while it stays open
+
+const syncState = { janitor: { at: 0, busy: false, error: '' }, chub: { at: 0, busy: false, error: '' } };
+let syncTimer = null;
+
+const siteConnected = (site) => (site === 'janitor' ? signedIn() : !!chubAccount().key);
+
+async function syncSite(site, force = false) {
+    const s = syncState[site];
+    if (s.busy || !siteConnected(site) || (!force && Date.now() - s.at < 60000)) return null;
+    s.busy = true;
+    s.error = '';
+    renderSyncBar();
+    try {
+        await loadFavorites();
+        const items = site === 'chub' ? await fetchChubFavorites() : await fetchJanitorFavorites();
+        const result = mergeFavorites(site, items);
+        s.at = Date.now();
+        return result;
+    } catch (error) {
+        console.warn(TAG, 'Favorites sync failed', site, error);
+        s.error = error.code === 'auth' ? 'login needed' : 'could not sync';
+        return null;
+    } finally {
+        s.busy = false;
+        updateStatus();
+        if (state.source === 'favorites' && !state.detail) renderFavorites();
+    }
+}
+
+async function autoSync(force = false) {
+    const results = await Promise.all(['janitor', 'chub'].map(site => syncSite(site, force)));
+    const added = results.reduce((n, r) => n + (r?.added || 0), 0);
+    if (added) toastr.info(`${added} new favorite${added > 1 ? 's' : ''} from your accounts.`, 'Bot Bazaar', { timeOut: 2500 });
+}
+
+function startAutoSync() {
+    clearInterval(syncTimer);
+    autoSync();
+    syncTimer = setInterval(() => {
+        if (state.source === 'favorites' && root?.classList.contains('jai_open')) autoSync();
+        else clearInterval(syncTimer);
+    }, 3 * 60 * 1000);
+}
+
+function syncPill(site) {
+    const s = syncState[site];
+    let text;
+    let cls = '';
+    if (!siteConnected(site)) {
+        text = '<span class="jai_link" data-jai-connect-site>connect to sync</span>';
+        cls = 'jai_pill_off';
+    } else if (s.busy) {
+        text = '<i class="fa-solid fa-rotate fa-spin"></i> syncing…';
+    } else if (s.error) {
+        text = s.error;
+        cls = 'jai_pill_bad';
+    } else {
+        text = s.at ? `<i class="fa-solid fa-check"></i> synced ${esc(timeAgo(new Date(s.at).toISOString()))}` : 'waiting';
+        cls = 'jai_pill_ok';
+    }
+    return `<span class="jai_pill ${cls}"><b>${SOURCE_LABEL[site]}</b> ${text}</span>`;
+}
+
+function renderSyncBar() {
+    const bar = root?.querySelector('.jai_syncbar');
+    if (bar) bar.innerHTML = `${syncPill('janitor')}${syncPill('chub')}<span class="jai_btn jai_small" data-sync-now title="Check both sites now"><i class="fa-solid fa-rotate"></i><span>Sync now</span></span>`;
 }
 
 const favButton = (item) => {
@@ -1040,49 +1124,46 @@ function refreshFavButtons() {
 
 // ---------------------------------------------------------------------------------------------- local views
 
+
 const SOURCE_LABEL = { janitor: 'JanitorAI', chub: 'Chub' };
-
-function localCard({ key, source, id, kind, name, image, creator, creatorId, meta, actions }) {
-    return `
-        <div class="jai_lcard" data-source="${esc(source)}" data-id="${esc(id)}" ${key ? `data-key="${esc(key)}"` : ''}>
-            <div class="jai_lthumb">${image ? `<img loading="lazy" referrerpolicy="no-referrer" src="${esc(image)}" alt="">` : '<i class="fa-solid fa-user"></i>'}</div>
-            <div class="jai_lbody">
-                <div class="jai_lname" title="${esc(name)}">${kind === 'lorebook' ? '<i class="fa-solid fa-book-atlas"></i> ' : ''}${esc(name)}</div>
-                <div class="jai_lmeta">
-                    <span class="jai_site jai_site_${esc(source)}">${SOURCE_LABEL[source] || esc(source)}</span>
-                    ${creator ? `<span class="jai_creator_link" data-creator="${esc(creatorId || creator)}" data-name="${esc(creator)}" data-source="${esc(source)}">@${esc(creator)}</span>` : ''}
-                </div>
-                ${meta ? `<div class="jai_lmeta jai_dim">${meta}</div>` : ''}
-                <div class="jai_lactions">${actions}</div>
-            </div>
-        </div>`;
-}
-
-function localToolbar(kind) {
-    const filter = state.localSource;
-    const sourceTabs = ['all', 'janitor', 'chub'].map(s => `<div class="jai_tab ${filter === s ? 'jai_active' : ''}" data-lsource="${s}">${s === 'all' ? 'All' : SOURCE_LABEL[s]}</div>`).join('');
-    const extra = kind === 'favorites'
-        ? `<div class="jai_btn jai_small" data-sync="janitor" title="Add your JanitorAI favorites (needs your JanitorAI account)"><i class="fa-solid fa-cloud-arrow-down"></i><span>Get JanitorAI favorites</span></div>
-           <div class="jai_btn jai_small" data-sync="chub" title="Add your Chub favorites (needs your Chub account)"><i class="fa-solid fa-cloud-arrow-down"></i><span>Get Chub favorites</span></div>`
-        : `<select class="jai_lsort"><option value="new" ${state.librarySort === 'new' ? 'selected' : ''}>Newest first</option><option value="name" ${state.librarySort === 'name' ? 'selected' : ''}>By name</option></select>`;
-    return `<div class="jai_ltoolbar"><div class="jai_tabs">${sourceTabs}</div>${extra}</div>`;
-}
 
 const matchesLocal = (item) => (state.localSource === 'all' || item.source === state.localSource)
     && (!state.search || `${item.name} ${item.creator}`.toLowerCase().includes(state.search.toLowerCase()));
 
+function siteFilter() {
+    const counts = { all: 0, janitor: 0, chub: 0 };
+    return (list) => {
+        list.forEach((item) => { counts.all++; counts[item.source] = (counts[item.source] || 0) + 1; });
+        return ['all', 'janitor', 'chub'].map(s => `<span class="jai_seg ${state.localSource === s ? 'jai_active' : ''}" data-lsource="${s}">${s === 'all' ? 'All' : SOURCE_LABEL[s]} <i>${counts[s] || 0}</i></span>`).join('');
+    };
+}
+
+/** Favorites: a wall of portrait posters, gold accents. */
 async function renderFavorites() {
     await loadFavorites();
     const items = favorites.filter(matchesLocal);
-    $('#jai_creator').innerHTML = localToolbar('favorites');
+    $('#jai_creator').innerHTML = `
+        <div class="jai_favhead">
+            <div class="jai_favtitle"><i class="fa-solid fa-star"></i> Favorites <span>${favorites.length}</span></div>
+            <div class="jai_segs">${siteFilter()(favorites)}</div>
+        </div>
+        <div class="jai_syncbar"></div>`;
     $('#jai_creator').style.display = '';
-    $('#jai_grid').innerHTML = items.map(f => localCard({
-        ...f,
-        meta: `Saved ${esc(timeAgo(f.addedAt))}`,
-        actions: `<div class="jai_btn jai_small" data-lopen><i class="fa-solid fa-eye"></i><span>Open</span></div>
-                  <div class="jai_btn jai_small" data-unfav="${esc(f.key)}" title="Remove from favorites"><i class="fa-solid fa-star"></i><span>Remove</span></div>`,
-    })).join('');
-    showMessage(items.length ? '' : (favorites.length ? 'Nothing matches.' : 'No favorites yet. Press the ☆ star on any character, or bring in the favorites from your JanitorAI or Chub account with the buttons above.'));
+    renderSyncBar();
+    $('#jai_grid').innerHTML = items.map(f => `
+        <div class="jai_poster" data-source="${esc(f.source)}" data-id="${esc(f.id)}" data-lopen title="${esc(f.name)}">
+            ${f.image ? `<img loading="lazy" referrerpolicy="no-referrer" src="${esc(f.image)}" alt="">` : '<div class="jai_poster_blank"><i class="fa-solid fa-user"></i></div>'}
+            <span class="jai_poster_site jai_site_${esc(f.source)}">${SOURCE_LABEL[f.source] || ''}${f.kind === 'lorebook' ? ' · Lorebook' : ''}</span>
+            <span class="jai_poster_star" data-unfav="${esc(f.key)}" title="Remove from favorites"><i class="fa-solid fa-star"></i></span>
+            <div class="jai_poster_info">
+                <div class="jai_poster_name">${esc(f.name)}</div>
+                ${f.creator ? `<span class="jai_creator_link" data-creator="${esc(f.creatorId || f.creator)}" data-name="${esc(f.creator)}" data-source="${esc(f.source)}">@${esc(f.creator)}</span>` : ''}
+                <span class="jai_poster_when">${f.fromSite ? `from your ${SOURCE_LABEL[f.fromSite]} favorites` : `starred ${esc(timeAgo(f.addedAt))}`}</span>
+            </div>
+        </div>`).join('');
+    showMessage(items.length ? '' : (favorites.length
+        ? 'Nothing matches.'
+        : 'No favorites yet. Tap the ☆ star on any character — or connect your JanitorAI / Chub account and the favorites you set on those sites appear here by themselves.'));
 }
 
 /** Characters this extension imported, read straight from SillyTavern's character list. */
@@ -1106,20 +1187,40 @@ function libraryItems() {
     }).filter(Boolean);
 }
 
+/** Library: a tidy list, one row per imported character. */
 function renderLibrary() {
-    const items = libraryItems().filter(matchesLocal)
+    const all = libraryItems();
+    const items = all.filter(matchesLocal)
         .sort((a, b) => (state.librarySort === 'name' ? a.name.localeCompare(b.name) : b.date - a.date));
-    $('#jai_creator').innerHTML = localToolbar('library');
+    $('#jai_creator').innerHTML = `
+        <div class="jai_libhead">
+            <div class="jai_libtitle"><i class="fa-solid fa-swatchbook"></i> Library <span>${all.length} imported</span></div>
+            <div class="jai_segs">${siteFilter()(all)}</div>
+            <select class="jai_lsort" title="Order">
+                <option value="new" ${state.librarySort === 'new' ? 'selected' : ''}>Newest first</option>
+                <option value="name" ${state.librarySort === 'name' ? 'selected' : ''}>A–Z</option>
+            </select>
+        </div>`;
     $('#jai_creator').style.display = '';
-    $('#jai_grid').innerHTML = items.map(item => localCard({
-        ...item,
-        creatorId: item.source === 'chub' ? item.creator : '',
-        meta: [item.date ? `Imported ${esc(timeAgo(new Date(item.date).toISOString()))}` : '', item.world ? `<i class="fa-solid fa-book-atlas"></i> ${esc(item.world)}` : ''].filter(Boolean).join(' · '),
-        actions: `<div class="jai_btn jai_small jai_primary" data-chat="${esc(item.avatar)}" title="Open this character in SillyTavern"><i class="fa-solid fa-comments"></i><span>Chat</span></div>
-                  <div class="jai_btn jai_small" data-lopen title="Show its page on ${SOURCE_LABEL[item.source]}"><i class="fa-solid fa-eye"></i><span>Page</span></div>
-                  <div class="jai_btn jai_small jai_danger" data-delete="${esc(item.avatar)}" title="Delete from SillyTavern"><i class="fa-solid fa-trash"></i><span>Delete</span></div>`,
-    })).join('');
-    showMessage(items.length ? '' : 'Nothing imported with Bot Bazaar yet.');
+    $('#jai_grid').innerHTML = items.length ? `<div class="jai_rows">${items.map(item => `
+        <div class="jai_row" data-source="${esc(item.source)}" data-id="${esc(item.id)}">
+            <img class="jai_row_avatar" loading="lazy" src="${esc(item.image)}" alt="">
+            <div class="jai_row_main">
+                <div class="jai_row_name">${esc(item.name)}</div>
+                <div class="jai_row_meta">
+                    <span class="jai_site jai_site_${esc(item.source)}">${SOURCE_LABEL[item.source]}</span>
+                    ${item.creator ? `<span class="jai_creator_link" data-creator="${esc(item.source === 'chub' ? item.creator : '')}" data-name="${esc(item.creator)}" data-source="${esc(item.source)}">@${esc(item.creator)}</span>` : ''}
+                    ${item.date ? `<span title="${esc(fullDate(new Date(item.date).toISOString()))}"><i class="fa-regular fa-clock"></i> ${esc(timeAgo(new Date(item.date).toISOString()))}</span>` : ''}
+                    ${item.world ? `<span class="jai_row_book" title="${esc(item.world)}"><i class="fa-solid fa-book-atlas"></i> lorebook</span>` : ''}
+                </div>
+            </div>
+            <div class="jai_row_actions">
+                <span class="jai_iconbtn jai_iconbtn_main" data-chat="${esc(item.avatar)}" title="Chat with this character"><i class="fa-solid fa-comments"></i></span>
+                <span class="jai_iconbtn" data-lopen title="Show its page on ${SOURCE_LABEL[item.source]}"><i class="fa-solid fa-arrow-up-right-from-square"></i></span>
+                <span class="jai_iconbtn jai_iconbtn_danger" data-delete="${esc(item.avatar)}" title="Delete from SillyTavern"><i class="fa-solid fa-trash-can"></i></span>
+            </div>
+        </div>`).join('')}</div>` : '';
+    showMessage(items.length ? '' : (all.length ? 'Nothing matches.' : 'Nothing imported with Bot Bazaar yet.'));
 }
 
 async function deleteFromLibrary(avatar) {
@@ -1382,26 +1483,6 @@ function janitorModel(item) {
     };
 }
 
-async function runSync(button) {
-    if (button.classList.contains('jai_disabled')) return;
-    const site = button.dataset.sync;
-    button.classList.add('jai_disabled');
-    try {
-        const { found, added } = site === 'chub' ? await syncChubFavorites() : await syncJanitorFavorites();
-        toastr.success(`Found ${found} favorite${found === 1 ? '' : 's'} on ${SOURCE_LABEL[site]}, ${added} new.`, 'Bot Bazaar');
-        updateStatus();
-        renderFavorites();
-    } catch (error) {
-        if (error.code === 'auth') {
-            showConnect(`${error.message} Then press the button again.`);
-        } else {
-            toastr.error(String(error.message || error), 'Bot Bazaar');
-        }
-    } finally {
-        button.classList.remove('jai_disabled');
-    }
-}
-
 const favAction = (item) => {
     const on = isFavorite(item.source, item.id);
     return `<div class="jai_btn jai_favbtn ${on ? 'jai_fav_on' : ''}" data-fav="${esc(JSON.stringify(item))}" title="${on ? 'Remove from favorites' : 'Add to favorites'}"><i class="fa-${on ? 'solid' : 'regular'} fa-star"></i><span>${on ? 'Favorited' : 'Favorite'}</span></div>`;
@@ -1515,8 +1596,8 @@ function buildUi() {
             state.localSource = localSource.dataset.lsource;
             return loadList();
         }
-        const sync = event.target.closest('[data-sync]');
-        if (sync) return runSync(sync);
+        if (event.target.closest('[data-sync-now]')) return autoSync(true);
+        if (event.target.closest('[data-jai-connect-site]')) return showConnect();
         const chat = event.target.closest('[data-chat]');
         if (chat) {
             const index = ctx().characters.findIndex(c => c.avatar === chat.dataset.chat);
@@ -1529,8 +1610,8 @@ function buildUi() {
         const remove = event.target.closest('[data-delete]');
         if (remove) return deleteFromLibrary(remove.dataset.delete);
         const localOpen = event.target.closest('[data-lopen]');
-        if (localOpen) {
-            const card = localOpen.closest('.jai_lcard');
+        if (localOpen && !event.target.closest('[data-creator]')) {
+            const card = localOpen.closest('[data-source][data-id]');
             return openItem(card.dataset.source, card.dataset.id);
         }
         const creator = event.target.closest('[data-creator]');
@@ -1568,6 +1649,7 @@ function buildUi() {
         const action = event.target.closest('[data-jai]')?.dataset.jai;
         if (action === 'retry') retry();
         if (action === 'open') openSite();
+        if (action === 'open-chub') window.open(CHUB_SITE, 'jai_chub');
         if (action === 'save') saveToken();
         if (action === 'paste') pasteToken();
         if (action === 'disconnect') disconnect();
@@ -1676,6 +1758,7 @@ function openCreator(id, name, source = state.source) {
 }
 
 function resume() {
+    awaitingLogin = false;
     if (state.detail) return openItem(state.detailSource, state.detail);
     if (!signedIn() && state.source === 'janitor') {
         // Anonymous JanitorAI visitors can only see the first page without a search, so go back to it.
@@ -1748,7 +1831,7 @@ function hideViews() {
 }
 
 // Run on janitorai.com (as a bookmark), this copies the visitor's own login token to the clipboard.
-const BOOKMARKLET = 'javascript:(()=>{if(/(^|\\.)(chub\\.ai|characterhub\\.org)$/.test(location.hostname)){let k=localStorage.getItem("URQL_TOKEN")||"";try{const j=JSON.parse(k);if(typeof j==="string")k=j}catch(e){}if(!k){alert("No Chub login found on this page. Sign in first.");return}const c="chub:"+k;const sc=()=>prompt("Copy this, then paste it into SillyTavern:",c);if(navigator.clipboard){navigator.clipboard.writeText(c).then(()=>alert("Chub key copied. Now paste it into SillyTavern."),sc)}else{sc()}return}'
+const BOOKMARKLET = 'javascript:(()=>{if(/(^|\\.)(chub\\.ai|characterhub\\.org)$/.test(location.hostname)){let k=localStorage.getItem("URQL_TOKEN")||"";try{const j=JSON.parse(k);if(typeof j==="string")k=j}catch(e){}if(!k){alert("No Chub login found on this page. Sign in first.");return}const c="chub:"+k;const sc=()=>prompt("Copy this, then paste it into SillyTavern:",c);if(navigator.clipboard){navigator.clipboard.writeText(c).then(()=>alert("Chub login copied. Go back to SillyTavern."),sc)}else{sc()}return}'
     + 'if(!/(^|\\.)janitorai\\.com$/.test(location.hostname)){alert("Open janitorai.com or chub.ai and sign in first, then use this button there.");return}'
     + 'const dec=s=>{try{s=decodeURIComponent(s)}catch(e){}const m=s.match(/base64-([\\w+/=-]+)/);if(m){try{s+=" "+atob(m[1].replace(/-/g,"+").replace(/_/g,"/"))}catch(e){}}return s};'
     + 'const ck={};document.cookie.split(";").map(p=>p.trim()).sort().forEach(p=>{const i=p.indexOf("=");if(i>0){const k=p.slice(0,i).replace(/\\.\\d+$/,"");ck[k]=(ck[k]||"")+p.slice(i+1)}});'
@@ -1757,46 +1840,100 @@ const BOOKMARKLET = 'javascript:(()=>{if(/(^|\\.)(chub\\.ai|characterhub\\.org)$
     + 'let t="";for(const v of vals){const m=dec(v).match(/eyJ[\\w-]+\\.eyJ[\\w-]+\\.[\\w-]+/);if(m){t=m[0];break}}'
     + 'if(!t){alert("No JanitorAI login found on this page. Sign in first.");return}'
     + 'const show=()=>prompt("Copy this token, then paste it into SillyTavern:",t);'
-    + 'if(navigator.clipboard){navigator.clipboard.writeText(t).then(()=>alert("JanitorAI token copied. Now paste it into SillyTavern."),show)}else{show()}})();';
+    + 'if(navigator.clipboard){navigator.clipboard.writeText(t).then(()=>alert("JanitorAI login copied. Go back to SillyTavern."),show)}else{show()}})();';
+
+let awaitingLogin = false;
+let lastClipboard = '';
 
 function showConnect(reason = '') {
     hideViews();
-    const { token, expired } = account();
-    const connected = token && !expired;
+    awaitingLogin = true;
+    const { token, expired, minutesLeft } = account();
+    const chub = chubAccount();
+    const janitorState = bridgeVersion
+        ? '<span class="jai_ok"><i class="fa-solid fa-check"></i> helper script</span>'
+        : (token && !expired
+            ? `<span class="jai_ok"><i class="fa-solid fa-check"></i> connected · ${minutesLeft >= 120 ? `~${Math.round(minutesLeft / 60)} h` : `${Math.max(minutesLeft ?? 0, 1)} min`} left</span>`
+            : `<span class="jai_bad">${expired ? 'login expired' : 'not connected'}</span>`);
+    const chubState = chub.key
+        ? `<span class="jai_ok"><i class="fa-solid fa-check"></i> connected${chub.user ? ` as @${esc(chub.user)}` : ''}</span>`
+        : '<span class="jai_bad">not connected</span>';
+    const steps = (site, openAction) => `
+        <ol class="jai_steps">
+            <li>${button(openAction, 'fa-up-right-from-square', `Open ${site}`)} <span>and sign in.</span></li>
+            <li>Press the <b>Bot Bazaar</b> bookmark on that page.</li>
+            <li>Come back here — it connects by itself.</li>
+        </ol>`;
     showMessage(`
-        <h3>Connect your accounts</h3>
-        <div class="jai_accounts">
-            <span><b>JanitorAI:</b> ${connected ? 'connected' : (expired ? 'login expired' : 'not connected')}${token ? ' · <span class="jai_link" data-jai="disconnect">disconnect</span>' : ''}</span>
-            <span><b>Chub:</b> ${chubAccount().key ? `connected${chubAccount().user ? ` as @${esc(chubAccount().user)}` : ''} · <span class="jai_link" data-jai="disconnect-chub">disconnect</span>` : 'not connected (only needed for your Chub favorites)'}</span>
-        </div>
-        <p class="jai_note">The same token button works on <b>chub.ai</b>: press it on a signed-in Chub tab to copy your Chub key, then Paste & connect. If you added the button before this version, add it again — it changed.</p>
+        <h3>Accounts</h3>
         ${reason ? `<p class="jai_bad"><i class="fa-solid fa-circle-info"></i> ${esc(reason)}</p>` : ''}
-        ${bridgeVersion ? '<p class="jai_ok">The helper script is installed, so no token is needed — just keep a signed-in JanitorAI tab open.</p>' : ''}
-        <p>Without an account JanitorAI only shows the first page of results. Search, more pages, character definitions and lorebooks need your login. JanitorAI's sign-in only works on its own site, so you carry your login over with a token button:</p>
-        <h4>One-time: add the token button</h4>
-        <ul>
-            <li><b>Computer:</b> press <b>Ctrl+Shift+B</b> so the bookmarks bar shows, then drag this onto it: <a class="jai_bookmarklet" href="${esc(BOOKMARKLET)}" title="Drag me to the bookmarks bar">Janitor token</a></li>
-            <li><b>Phone (or if dragging fails):</b> ${button('copycode', 'fa-copy', 'Copy button code')} then bookmark any page, edit that bookmark, paste the code as its address and name it <b>jtoken</b>.</li>
-        </ul>
-        <h4>Each time you connect</h4>
-        <ol>
-            <li>${button('open', 'fa-up-right-from-square', 'Open JanitorAI')} and make sure you are signed in.</li>
-            <li>On that JanitorAI tab press the <b>Janitor token</b> bookmark (phone: type <b>jtoken</b> in the address bar and tap the bookmark). It says "token copied".</li>
-            <li>Come back here and press ${button('paste', 'fa-paste', 'Paste & connect')}</li>
-        </ol>
-        <textarea id="jai_token" class="text_pole" rows="2" spellcheck="false" placeholder="${connected ? 'A token is saved. Paste a new one here to replace it.' : '…or paste the token here yourself'}"></textarea>
-        ${actions(button('save', 'fa-plug', 'Connect'), token ? button('disconnect', 'fa-plug-circle-xmark', 'Disconnect') : '', button('resume', 'fa-arrow-left', 'Back'))}
-        <p class="jai_note">A JanitorAI login lasts about 3 hours, then steps 2 and 3 are needed again (the status at the top shows the time left). The token is your login: it is saved in your SillyTavern settings and sent only to janitorai.com — never share it with anyone.</p>
+        <div class="jai_acc_grid">
+            <div class="jai_acc">
+                <div class="jai_acc_head"><b>JanitorAI</b> ${janitorState}</div>
+                <p class="jai_note">For search, definitions, lorebooks and your JanitorAI favorites. A JanitorAI login lasts about 3 hours, then repeat steps 2–3.</p>
+                ${steps('JanitorAI', 'open')}
+                ${token ? '<span class="jai_link" data-jai="disconnect">Disconnect JanitorAI</span>' : ''}
+            </div>
+            <div class="jai_acc">
+                <div class="jai_acc_head"><b>Chub</b> ${chubState}</div>
+                <p class="jai_note">Only for your Chub favorites — browsing Chub never needs it. Connect once; it doesn't expire.</p>
+                ${steps('Chub', 'open-chub')}
+                ${chub.key ? '<span class="jai_link" data-jai="disconnect-chub">Disconnect Chub</span>' : ''}
+            </div>
+        </div>
+        <details class="jai_bm" ${settings().bookmarkSeen ? '' : 'open'}>
+            <summary><b>First time:</b> add the Bot Bazaar bookmark (one button for both sites)</summary>
+            <ul>
+                <li><b>Computer:</b> press <b>Ctrl+Shift+B</b> to show the bookmarks bar, then drag this onto it: <a class="jai_bookmarklet" href="${esc(BOOKMARKLET)}" title="Drag me to the bookmarks bar">Bot Bazaar</a></li>
+                <li><b>Phone:</b> ${button('copycode', 'fa-copy', 'Copy bookmark code')} then bookmark any page, edit that bookmark, paste the code as its address and name it <b>bazaar</b>. On JanitorAI or Chub, type <b>bazaar</b> in the address bar and tap the bookmark.</li>
+            </ul>
+            <p class="jai_note">Added the "Janitor token" bookmark before? Replace it with this one — it now works on Chub too.</p>
+        </details>
         <details>
-            <summary>Never copy a token again (computer)</summary>
+            <summary>It didn't connect by itself?</summary>
+            <p class="jai_note">Some browsers (mostly on phones) don't let pages read what you copied. Paste it here instead:</p>
+            <textarea id="jai_token" class="text_pole" rows="2" spellcheck="false" placeholder="Paste what the Bot Bazaar bookmark copied"></textarea>
+            ${actions(button('save', 'fa-plug', 'Connect'), button('paste', 'fa-paste', 'Paste & connect'))}
+        </details>
+        <details>
+            <summary>Never copy anything (computer, JanitorAI only)</summary>
             <p>With the helper script the extension uses your open JanitorAI tab directly, so nothing expires and nothing is copied:</p>
             <ol>
                 <li>Install <a href="https://www.tampermonkey.net/" target="_blank" rel="noopener">Tampermonkey</a>.</li>
-                <li>Right-click the Tampermonkey icon → <b>Manage extension</b> → switch on <b>Allow User Scripts</b>. Without this switch Chrome silently blocks the script.</li>
+                <li>Right-click the Tampermonkey icon → <b>Manage extension</b> → switch on <b>Allow User Scripts</b>.</li>
                 <li>Install the <a href="${esc(USERSCRIPT_URL)}" target="_blank" rel="noopener">helper script</a>, then reload both SillyTavern and JanitorAI and keep a JanitorAI tab open.</li>
             </ol>
-        </details>`);
+        </details>
+        ${actions(button('resume', 'fa-arrow-left', 'Back'))}
+        <p class="jai_note">Your logins are saved in SillyTavern and this browser, and sent only to janitorai.com and chub.ai — never share them.</p>`);
+    $('#jai_message').querySelector('.jai_bm')?.addEventListener('toggle', () => {
+        settings().bookmarkSeen = true;
+        ctx().saveSettingsDebounced();
+    }, { once: true });
 }
+
+/** When you come back from JanitorAI or Chub with a login copied, connect it without asking. */
+async function checkClipboardForLogin() {
+    if (!awaitingLogin || !root?.classList.contains('jai_open') || !document.hasFocus() || !$('#jai_token')) return;
+    let text = '';
+    try {
+        text = await navigator.clipboard.readText();
+    } catch {
+        return;
+    }
+    if (!text || text === lastClipboard) return;
+    lastClipboard = text;
+    const jwt = extractToken(text);
+    const chubKey = extractChubKey(text);
+    if ((!jwt && !chubKey) || (jwt && jwt === account().token) || (chubKey && chubKey === chubAccount().key)) return;
+    $('#jai_token').value = text;
+    await saveToken();
+}
+
+window.addEventListener('focus', () => setTimeout(checkClipboardForLogin, 300));
+document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') setTimeout(checkClipboardForLogin, 300);
+});
 
 async function pasteToken() {
     let text = '';
@@ -1821,7 +1958,8 @@ async function saveToken() {
         if (!account) return showConnect('Chub did not accept that key. Make sure you are signed in on chub.ai and press the token button there again.');
         storeChubKey(chubKey, account.user_name || account.name || '');
         toastr.success(`Chub account connected${account.user_name ? ` as @${account.user_name}` : ''}.`, 'Bot Bazaar');
-        return resume();
+        syncState.chub.at = 0;
+        return showConnect();
     }
     const token = extractToken($('#jai_token').value);
     if (!token) return toastr.warning('That text does not contain a JanitorAI token.', 'Bot Bazaar');
@@ -1842,7 +1980,8 @@ async function saveToken() {
         return showConnect('JanitorAI did not accept that token. Make sure you are signed in on JanitorAI and copy it again.');
     }
     toastr.success('JanitorAI account connected.', 'Bot Bazaar');
-    resume();
+    syncState.janitor.at = 0;
+    showConnect();
 }
 
 function disconnect(interactive = true) {
@@ -1889,6 +2028,8 @@ function setView(view) {
 /** Draws the tabs for the current site and lists the active filters as removable chips. */
 function renderControls() {
     root.classList.toggle('jai_theme_chub', state.source === 'chub');
+    root.classList.toggle('jai_theme_fav', state.source === 'favorites');
+    root.classList.toggle('jai_theme_lib', state.source === 'library');
     updateStatus();
     root.querySelectorAll('#jai_sources .jai_tab').forEach(tab => tab.classList.toggle('jai_active', tab.dataset.source === state.source));
     const isChub = state.source === 'chub';
@@ -1956,7 +2097,11 @@ async function loadList() {
     if (isLocalView()) {
         root.querySelector('.jai_footer').style.display = 'none';
         showMessage('');
-        return state.source === 'favorites' ? renderFavorites().then(updateStatus) : renderLibrary();
+        if (state.source === 'favorites') {
+            startAutoSync();
+            return renderFavorites().then(updateStatus);
+        }
+        return renderLibrary();
     }
     state.loading = true;
     const request = ++listRequest;

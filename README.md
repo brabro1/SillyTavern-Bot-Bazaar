@@ -36,37 +36,35 @@ Open it with the store button next to "Import content from external URL" in the 
 
 ## Favorites and Library
 
-- **Favorites** collects bots from both sites in one tab. Press the ☆ star on any card or character page.
-  **Get JanitorAI favorites** / **Get Chub favorites** bring in the favorites from your accounts on those
-  sites. Favorites are stored on your SillyTavern server, so every device using it sees the same list.
-- **Library** shows every character you imported with Bot Bazaar: open its chat, jump back to its page,
+- **Favorites** collects bots from both sites on one gold poster wall. Press the ☆ star on any card or
+  character page. With your accounts connected, the favorites you set **on JanitorAI and Chub appear here
+  by themselves** (checked whenever you open the tab and every few minutes while it's open), and ones you
+  un-favorite on the site disappear. Stored on your SillyTavern server, so every device sees the same list.
+- **Library** lists every character you imported with Bot Bazaar: chat with it, jump back to its page,
   or delete it (optionally together with its lorebook).
 
 ## Chub
 
 Browsing needs nothing — Chub's API is public. Linked lorebooks are merged with the card's own lorebook.
-Only **Get Chub favorites** needs your Chub login: press the same token bookmark on a signed-in chub.ai tab,
-then **Paste & connect**.
 
-## JanitorAI: connecting your account
+## Connecting your accounts
 
-Without an account JanitorAI only shows the first page of results and no definitions or lorebooks.
-JanitorAI's sign-in (captcha, Google/Discord/Apple) only works on its own site, so you carry your
-login over with a small bookmark:
+JanitorAI and Chub don't let other apps sign you in, so Bot Bazaar borrows the login your browser already has,
+using one small bookmark:
 
-1. One-time: add the **Janitor token** bookmark shown in the Account panel
-   (computer: drag it to the bookmarks bar; phone: copy the code and save it as a bookmark named `jtoken`).
-2. On a signed-in JanitorAI tab, press that bookmark. It copies your login token.
-3. Back in SillyTavern press **Paste & connect**.
+1. One-time: in **Account**, add the **Bot Bazaar** bookmark (computer: drag it to the bookmarks bar;
+   phone: copy the code and save it as a bookmark named `bazaar`).
+2. Open JanitorAI or Chub (signed in) and press the bookmark.
+3. Come back to SillyTavern — it connects by itself. (If your browser doesn't allow that, paste instead.)
 
-A JanitorAI login lasts about 3 hours; after that repeat steps 2 and 3.
+- **JanitorAI** is needed for search, definitions, lorebooks and favorites. Its login lasts about 3 hours.
+- **Chub** is only needed for your Chub favorites — browsing never needs it. Connect once; it doesn't expire.
 
-Desktop alternative with nothing to copy: install [Tampermonkey](https://www.tampermonkey.net/),
+Desktop alternative for JanitorAI with nothing to copy: install [Tampermonkey](https://www.tampermonkey.net/),
 switch on **Allow User Scripts** for it, and install `janitor-bridge.user.js` from this repository.
-The extension then works through your open JanitorAI tab.
 
-The token is your JanitorAI login. It is stored in your SillyTavern settings and only sent to
-janitorai.com — never share it, and remember it is inside settings backups.
+Your logins are stored in your SillyTavern settings and this browser, and only sent to janitorai.com and chub.ai —
+never share them, and remember they're inside settings backups.
 
 ## Hidden definitions, private lorebooks and JannyAI
 
