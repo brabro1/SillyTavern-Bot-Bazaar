@@ -62,49 +62,80 @@ function tokenExpiry(token) {
 
 const SESSION_KEY = 'botBazaar.janitorSession';
 const TOKEN_KEY = 'botBazaar.janitorToken';
+// One shared copy on the SillyTavern server, so every tab and device uses the same, newest login. Written as its own
+// file (like the favorites), so a tab holding old settings in memory can't save an outdated login over it.
+const SESSION_FILE = 'bot-bazaar-login.json';
+let fileSession = null;
 
 const readLocal = (key) => {
     try { return localStorage.getItem(key) || ''; } catch { return ''; }
 };
 
+const parseSession = (raw) => {
+    if (!raw) return null;
+    try {
+        const session = typeof raw === 'string' ? JSON.parse(raw) : raw;
+        return session && typeof session === 'object' ? session : null;
+    } catch {
+        return null;
+    }
+};
+
+const sessionExpiry = (session) => (session?.expires_at ? session.expires_at * 1000 : (session?.access_token ? tokenExpiry(session.access_token) : null));
+
+/** Newest copy wins: by save time, then by expiry. A disconnect is saved too (no token), so it wins over older logins. */
+const newestSession = (copies) => copies.filter(Boolean)
+    .sort((a, b) => ((b.saved_at || 0) - (a.saved_at || 0)) || ((sessionExpiry(b) || 0) - (sessionExpiry(a) || 0)))[0] || null;
+
 /**
  * The JanitorAI login. The access token is what the API needs; when the bookmark also captured the refresh token
- * and the site's public key, Bot Bazaar can renew the access token the same way the JanitorAI website does, so the
- * login no longer lapses after a few hours.
+ * and the site's public key, Bot Bazaar renews the access token the same way the JanitorAI website does.
  */
 function janitorSession() {
-    const raw = settings().session || readLocal(SESSION_KEY);
-    if (raw) {
-        try {
-            const session = typeof raw === 'string' ? JSON.parse(raw) : raw;
-            if (session?.access_token) return session;
-        } catch { /* fall back to a bare token */ }
-    }
+    const newest = newestSession([parseSession(settings().session), parseSession(readLocal(SESSION_KEY)), fileSession]);
+    if (newest) return newest.access_token ? newest : null;
     const token = settings().token || readLocal(TOKEN_KEY);
     return token ? { access_token: token } : null;
 }
 
-/** Saved both in SillyTavern settings (shared across devices) and in this browser (a tab with stale settings can't wipe it). */
+async function loadSessionFile() {
+    try {
+        const response = await fetch(`/user/files/${SESSION_FILE}?t=${Date.now()}`, { cache: 'no-store' });
+        if (response.ok) fileSession = parseSession(await response.json());
+    } catch { /* no shared copy yet */ }
+    return fileSession;
+}
+
+async function uploadSessionFile(record) {
+    fileSession = record;
+    try {
+        await fetch('/api/files/upload', {
+            method: 'POST',
+            headers: ctx().getRequestHeaders(),
+            body: JSON.stringify({ name: SESSION_FILE, data: base64Utf8(JSON.stringify(record)) }),
+        });
+    } catch (error) {
+        console.warn(TAG, 'Could not save the shared login', error);
+    }
+}
+
+/** Saves the login in this browser, the SillyTavern settings and the shared login file. Pass null to disconnect. */
 function storeJanitorSession(session) {
-    const serial = session ? JSON.stringify(session) : '';
+    const record = { ...(session || {}), saved_at: Date.now() };
+    const serial = JSON.stringify(record);
     settings().session = serial;
     settings().token = session?.access_token || '';
     ctx().saveSettingsDebounced();
     try {
-        if (serial) {
-            localStorage.setItem(SESSION_KEY, serial);
-            localStorage.setItem(TOKEN_KEY, session.access_token || '');
-        } else {
-            localStorage.removeItem(SESSION_KEY);
-            localStorage.removeItem(TOKEN_KEY);
-        }
+        localStorage.setItem(SESSION_KEY, serial);
+        if (session?.access_token) localStorage.setItem(TOKEN_KEY, session.access_token);
+        else localStorage.removeItem(TOKEN_KEY);
     } catch { /* storage unavailable */ }
+    return uploadSessionFile(record);
 }
 
 /** Manual-paste path: wrap a bare token as a (non-renewable) session. */
 const storeToken = (token) => storeJanitorSession(token ? { access_token: token } : null);
-
-const sessionExpiry = (session) => (session?.expires_at ? session.expires_at * 1000 : (session?.access_token ? tokenExpiry(session.access_token) : null));
 
 function account() {
     const session = janitorSession();
@@ -124,10 +155,14 @@ let refreshing = null;
 /** Renews the JanitorAI login from its refresh token — the same request the JanitorAI website makes in the background. */
 function refreshJanitor() {
     if (refreshing) return refreshing;
-    const { session } = account();
-    if (!session?.refresh_token || !session?.apikey) return Promise.resolve(false);
     refreshing = (async () => {
         try {
+            // Another tab or device may already have renewed it; never renew from an outdated copy.
+            await loadSessionFile();
+            const { session, minutesLeft } = account();
+            if (!session?.refresh_token || !session?.apikey) return false;
+            if (minutesLeft !== null && minutesLeft > 2) return true;
+
             const response = await fetch(`${JANITOR_AUTH}/token?grant_type=refresh_token`, {
                 method: 'POST',
                 credentials: 'omit',
@@ -135,13 +170,17 @@ function refreshJanitor() {
                 body: JSON.stringify({ refresh_token: session.refresh_token }),
             });
             if (!response.ok) {
-                // Refresh token no longer valid (signed out on the site, or rotated away): drop it so we don't retry forever.
-                if (response.status === 400 || response.status === 401) storeJanitorSession({ access_token: session.access_token });
+                // Maybe someone renewed it a moment ago; if so, use theirs.
+                await loadSessionFile();
+                const latest = account();
+                if (latest.session?.refresh_token && latest.session.refresh_token !== session.refresh_token) return true;
+                // Otherwise the renewal is no longer valid (signed out on the site): keep the login until it expires, stop renewing.
+                if (response.status === 400 || response.status === 401) await storeJanitorSession({ access_token: session.access_token, expires_at: session.expires_at });
                 return false;
             }
             const data = await response.json();
             if (!data?.access_token) return false;
-            storeJanitorSession({
+            await storeJanitorSession({
                 access_token: data.access_token,
                 refresh_token: data.refresh_token || session.refresh_token,
                 expires_at: data.expires_at || (data.expires_in ? Math.floor(Date.now() / 1000) + data.expires_in : undefined),
@@ -163,9 +202,20 @@ async function ensureFreshJanitor() {
     if (token && canRefresh && (minutesLeft === null || minutesLeft <= 2)) await refreshJanitor();
 }
 
+/** On start: pick up the shared login (and share this browser's, if it is newer or the file doesn't exist yet). */
+async function syncSessionOnStart() {
+    await loadSessionFile();
+    const local = newestSession([parseSession(settings().session), parseSession(readLocal(SESSION_KEY))]);
+    if (local?.access_token && (!fileSession || (local.saved_at || 0) > (fileSession.saved_at || 0))) {
+        await uploadSessionFile({ ...local, saved_at: local.saved_at || Date.now() });
+    }
+    scheduleRefresh();
+    if (root) updateStatus();
+}
+
 let refreshTimer = null;
 
-/** Keeps the login current while Bot Bazaar is in use, refreshing shortly before it would expire. */
+/** Keeps the login current while SillyTavern is open, refreshing shortly before it would expire. */
 function scheduleRefresh() {
     clearTimeout(refreshTimer);
     const { token, canRefresh, minutesLeft } = account();
@@ -2907,7 +2957,7 @@ async function openChubDetail(fullPath) {
 
 async function openBrowser() {
     if (!root) buildUi();
-    await loadFavorites();
+    await Promise.all([loadFavorites(), loadSessionFile()]);
     root.classList.add('jai_open');
     await detectBridge();
     updateStatus();
@@ -3048,6 +3098,6 @@ function addButtons() {
 jQuery(() => {
     addButtons();
     handleHandoff();
-    scheduleRefresh();
+    syncSessionOnStart();
     console.info(TAG, 'loaded');
 });
