@@ -25,6 +25,7 @@ const ctx = () => SillyTavern.getContext();
 // ---------------------------------------------------------------------------------------------- account token
 
 const TOKEN = /eyJ[\w-]+\.eyJ[\w-]+\.[\w-]+/;
+const JANITOR_AUTH = 'https://auth.janitorai.com/auth/v1';
 
 function settings() {
     const all = ctx().extensionSettings;
@@ -34,7 +35,7 @@ function settings() {
 
 const fromBase64Url = (text) => atob(text.replace(/-/g, '+').replace(/_/g, '/'));
 
-/** Pulls the login token out of whatever was pasted: the bare token, "Bearer …", a cookie value or session JSON. */
+/** Pulls a bare login token out of whatever was pasted. */
 function extractToken(raw) {
     const text = String(raw || '').trim();
     const variants = [text];
@@ -59,39 +60,125 @@ function tokenExpiry(token) {
     }
 }
 
+const SESSION_KEY = 'botBazaar.janitorSession';
 const TOKEN_KEY = 'botBazaar.janitorToken';
 
-const readLocalToken = () => {
-    try { return localStorage.getItem(TOKEN_KEY) || ''; } catch { return ''; }
+const readLocal = (key) => {
+    try { return localStorage.getItem(key) || ''; } catch { return ''; }
 };
 
 /**
- * Saves the token twice: in the SillyTavern settings (so other devices get it) and in this browser (because when
- * SillyTavern is open in several tabs, a tab with older settings can overwrite the saved settings).
+ * The JanitorAI login. The access token is what the API needs; when the bookmark also captured the refresh token
+ * and the site's public key, Bot Bazaar can renew the access token the same way the JanitorAI website does, so the
+ * login no longer lapses after a few hours.
  */
-function storeToken(token) {
-    settings().token = token;
+function janitorSession() {
+    const raw = settings().session || readLocal(SESSION_KEY);
+    if (raw) {
+        try {
+            const session = typeof raw === 'string' ? JSON.parse(raw) : raw;
+            if (session?.access_token) return session;
+        } catch { /* fall back to a bare token */ }
+    }
+    const token = settings().token || readLocal(TOKEN_KEY);
+    return token ? { access_token: token } : null;
+}
+
+/** Saved both in SillyTavern settings (shared across devices) and in this browser (a tab with stale settings can't wipe it). */
+function storeJanitorSession(session) {
+    const serial = session ? JSON.stringify(session) : '';
+    settings().session = serial;
+    settings().token = session?.access_token || '';
     ctx().saveSettingsDebounced();
     try {
-        if (token) localStorage.setItem(TOKEN_KEY, token);
-        else localStorage.removeItem(TOKEN_KEY);
+        if (serial) {
+            localStorage.setItem(SESSION_KEY, serial);
+            localStorage.setItem(TOKEN_KEY, session.access_token || '');
+        } else {
+            localStorage.removeItem(SESSION_KEY);
+            localStorage.removeItem(TOKEN_KEY);
+        }
     } catch { /* storage unavailable */ }
 }
 
+/** Manual-paste path: wrap a bare token as a (non-renewable) session. */
+const storeToken = (token) => storeJanitorSession(token ? { access_token: token } : null);
+
+const sessionExpiry = (session) => (session?.expires_at ? session.expires_at * 1000 : (session?.access_token ? tokenExpiry(session.access_token) : null));
+
 function account() {
-    // Use whichever copy expires last.
-    const token = [settings().token || '', readLocalToken()]
-        .filter(Boolean)
-        .sort((a, b) => (tokenExpiry(b) ?? 0) - (tokenExpiry(a) ?? 0))[0] || '';
-    const expiry = token ? tokenExpiry(token) : null;
+    const session = janitorSession();
+    const token = session?.access_token || '';
+    const expiry = sessionExpiry(session);
     return {
         token,
+        session,
+        canRefresh: !!(session?.refresh_token && session?.apikey),
         expired: !!token && expiry !== null && expiry < Date.now(),
         minutesLeft: expiry !== null ? Math.round((expiry - Date.now()) / 60000) : null,
     };
 }
 
-const signedIn = () => !!bridgeVersion || (!!account().token && !account().expired);
+let refreshing = null;
+
+/** Renews the JanitorAI login from its refresh token — the same request the JanitorAI website makes in the background. */
+function refreshJanitor() {
+    if (refreshing) return refreshing;
+    const { session } = account();
+    if (!session?.refresh_token || !session?.apikey) return Promise.resolve(false);
+    refreshing = (async () => {
+        try {
+            const response = await fetch(`${JANITOR_AUTH}/token?grant_type=refresh_token`, {
+                method: 'POST',
+                credentials: 'omit',
+                headers: { apikey: session.apikey, Authorization: `Bearer ${session.apikey}`, 'Content-Type': 'application/json' },
+                body: JSON.stringify({ refresh_token: session.refresh_token }),
+            });
+            if (!response.ok) {
+                // Refresh token no longer valid (signed out on the site, or rotated away): drop it so we don't retry forever.
+                if (response.status === 400 || response.status === 401) storeJanitorSession({ access_token: session.access_token });
+                return false;
+            }
+            const data = await response.json();
+            if (!data?.access_token) return false;
+            storeJanitorSession({
+                access_token: data.access_token,
+                refresh_token: data.refresh_token || session.refresh_token,
+                expires_at: data.expires_at || (data.expires_in ? Math.floor(Date.now() / 1000) + data.expires_in : undefined),
+                apikey: session.apikey,
+            });
+            return true;
+        } catch {
+            return false;
+        } finally {
+            refreshing = null;
+        }
+    })();
+    return refreshing;
+}
+
+/** Before a request, renew the token if it has expired or is about to, and we can. */
+async function ensureFreshJanitor() {
+    const { token, canRefresh, minutesLeft } = account();
+    if (token && canRefresh && (minutesLeft === null || minutesLeft <= 2)) await refreshJanitor();
+}
+
+let refreshTimer = null;
+
+/** Keeps the login current while Bot Bazaar is in use, refreshing shortly before it would expire. */
+function scheduleRefresh() {
+    clearTimeout(refreshTimer);
+    const { token, canRefresh, minutesLeft } = account();
+    if (!token || !canRefresh) return;
+    const delay = Math.max(60000, ((minutesLeft ?? 60) - 2) * 60000);
+    refreshTimer = setTimeout(async () => {
+        if (await refreshJanitor()) updateStatus();
+        scheduleRefresh();
+    }, delay);
+}
+
+// Renewable logins count as connected even past the access token's expiry, since the next request refreshes first.
+const signedIn = () => !!bridgeVersion || (!!account().token && (!account().expired || account().canRefresh));
 
 // ---------------------------------------------------------------------------------------------- transport
 
@@ -151,6 +238,7 @@ async function viaHelper(path) {
 }
 
 async function direct(path) {
+    await ensureFreshJanitor();
     const { token, expired } = account();
     const headers = { Accept: 'application/json' };
     // JanitorAI treats a bad token as "anonymous" instead of rejecting it, so never send one we know is stale.
@@ -1659,7 +1747,7 @@ function buildUi() {
             showConnect();
         }
         if (action === 'resume') resume();
-        if (action === 'copycode') copyText(BOOKMARKLET, 'Button code copied.');
+        if (action === 'copycode') copyText(buildBookmarklet(), 'Button code copied.');
     });
 }
 
@@ -1831,16 +1919,7 @@ function hideViews() {
 }
 
 // Run on janitorai.com (as a bookmark), this copies the visitor's own login token to the clipboard.
-const BOOKMARKLET = 'javascript:(()=>{if(/(^|\\.)(chub\\.ai|characterhub\\.org)$/.test(location.hostname)){let k=localStorage.getItem("URQL_TOKEN")||"";try{const j=JSON.parse(k);if(typeof j==="string")k=j}catch(e){}if(!k){alert("No Chub login found on this page. Sign in first.");return}const c="chub:"+k;const sc=()=>prompt("Copy this, then paste it into SillyTavern:",c);if(navigator.clipboard){navigator.clipboard.writeText(c).then(()=>alert("Chub login copied. Go back to SillyTavern."),sc)}else{sc()}return}'
-    + 'if(!/(^|\\.)janitorai\\.com$/.test(location.hostname)){alert("Open janitorai.com or chub.ai and sign in first, then use this button there.");return}'
-    + 'const dec=s=>{try{s=decodeURIComponent(s)}catch(e){}const m=s.match(/base64-([\\w+/=-]+)/);if(m){try{s+=" "+atob(m[1].replace(/-/g,"+").replace(/_/g,"/"))}catch(e){}}return s};'
-    + 'const ck={};document.cookie.split(";").map(p=>p.trim()).sort().forEach(p=>{const i=p.indexOf("=");if(i>0){const k=p.slice(0,i).replace(/\\.\\d+$/,"");ck[k]=(ck[k]||"")+p.slice(i+1)}});'
-    + 'const vals=[];for(const k in ck){if(/auth/i.test(k))vals.unshift(ck[k]);else vals.push(ck[k])}'
-    + 'for(let i=0;i<localStorage.length;i++){const k=localStorage.key(i);const v=localStorage.getItem(k)||"";if(/auth/i.test(k))vals.unshift(v);else vals.push(v)}'
-    + 'let t="";for(const v of vals){const m=dec(v).match(/eyJ[\\w-]+\\.eyJ[\\w-]+\\.[\\w-]+/);if(m){t=m[0];break}}'
-    + 'if(!t){alert("No JanitorAI login found on this page. Sign in first.");return}'
-    + 'const show=()=>prompt("Copy this token, then paste it into SillyTavern:",t);'
-    + 'if(navigator.clipboard){navigator.clipboard.writeText(t).then(()=>alert("JanitorAI login copied. Go back to SillyTavern."),show)}else{show()}})();';
+// (bookmark moved to buildBookmarklet, defined above addButtons)
 
 let awaitingLogin = false;
 let lastClipboard = '';
@@ -1884,7 +1963,7 @@ function showConnect(reason = '') {
         <details class="jai_bm" ${settings().bookmarkSeen ? '' : 'open'}>
             <summary><b>First time:</b> add the Bot Bazaar bookmark (one button for both sites)</summary>
             <ul>
-                <li><b>Computer:</b> press <b>Ctrl+Shift+B</b> to show the bookmarks bar, then drag this onto it: <a class="jai_bookmarklet" href="${esc(BOOKMARKLET)}" title="Drag me to the bookmarks bar">Bot Bazaar</a></li>
+                <li><b>Computer:</b> press <b>Ctrl+Shift+B</b> to show the bookmarks bar, then drag this onto it: <a class="jai_bookmarklet" href="${esc(buildBookmarklet())}" title="Drag me to the bookmarks bar">Bot Bazaar</a></li>
                 <li><b>Phone:</b> ${button('copycode', 'fa-copy', 'Copy bookmark code')} then bookmark any page, edit that bookmark, paste the code as its address and name it <b>bazaar</b>. On JanitorAI or Chub, type <b>bazaar</b> in the address bar and tap the bookmark.</li>
             </ul>
             <p class="jai_note">Added the "Janitor token" bookmark before? Replace it with this one — it now works on Chub too.</p>
@@ -1948,6 +2027,12 @@ async function pasteToken() {
 }
 
 async function saveToken() {
+    const bazaar = $('#jai_token').value.trim().match(/bazaar:([A-Za-z0-9+/=_-]+)/);
+    if (bazaar) {
+        showMessage('<i class="fa-solid fa-spinner fa-spin"></i> Connecting…');
+        const done = await importLogin(decodeHandoff(bazaar[1]));
+        return done.length ? showConnect() : showConnect('That was not a valid Bot Bazaar login. Press the bookmark again.');
+    }
     const chubKey = extractChubKey($('#jai_token').value);
     if (chubKey) {
         showMessage('<i class="fa-solid fa-spinner fa-spin"></i> Checking the Chub key…');
@@ -2835,6 +2920,108 @@ function closeBrowser() {
 
 // ---------------------------------------------------------------------------------------------- entry points
 
+/*
+ * The one bookmark. Pressed on a signed-in JanitorAI or Chub tab, it collects the login this browser already holds
+ * and hands it straight to SillyTavern through the page URL's #fragment (which browsers never send to any server).
+ * This replaces copy-and-paste, which some phone browsers block. For JanitorAI it also captures the refresh token
+ * and the site's public key, so Bot Bazaar can keep the login current by itself.
+ *
+ * Written as a real function so buildBookmarklet() can stringify it faithfully — backslashes in its regexes stay intact.
+ */
+async function botBazaarBookmark(ST) {
+    const CHUB = /(^|\.)(chub\.ai|characterhub\.org)$/.test(location.hostname);
+    const JANITOR = /(^|\.)janitorai\.com$/.test(location.hostname);
+    if (!CHUB && !JANITOR) { alert('Open janitorai.com or chub.ai (signed in) first, then press this.'); return; }
+    let payload;
+    if (CHUB) {
+        let key = localStorage.getItem('URQL_TOKEN') || '';
+        try { const parsed = JSON.parse(key); if (typeof parsed === 'string') key = parsed; } catch (e) { /* already plain */ }
+        if (!key) { alert('No Chub login found here. Sign in to chub.ai first.'); return; }
+        payload = { v: 1, chub: key };
+    } else {
+        const decode = (s) => {
+            try { s = decodeURIComponent(s); } catch (e) { /* already decoded */ }
+            const m = s.match(/base64-([\w+/=-]+)/);
+            if (m) { try { return atob(m[1].replace(/-/g, '+').replace(/_/g, '/')); } catch (e) { /* not base64 */ } }
+            return s;
+        };
+        const cookies = {};
+        document.cookie.split(';').map(p => p.trim()).forEach((p) => { const i = p.indexOf('='); if (i > 0) cookies[p.slice(0, i)] = p.slice(i + 1); });
+        const groups = {};
+        Object.keys(cookies).filter(k => /auth-token/i.test(k)).sort().forEach((k) => { const base = k.replace(/\.\d+$/, ''); groups[base] = (groups[base] || '') + cookies[k]; });
+        const candidates = Object.values(groups);
+        for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); if (/auth-token|^sb-/i.test(k)) candidates.push(localStorage.getItem(k)); }
+        let session = null;
+        for (const raw of candidates) { try { const o = JSON.parse(decode(raw)); if (o && o.access_token && o.refresh_token) { session = o; break; } } catch (e) { /* skip */ } }
+        if (!session) { alert('No JanitorAI login found here. Sign in to janitorai.com first.'); return; }
+        let apikey = '';
+        try {
+            const src = [].slice.call(document.querySelectorAll('script[src]')).map(s => s.src).filter(s => /index-.*\.js/.test(s))[0];
+            const txt = await (await fetch(src)).text();
+            const jwts = txt.match(/eyJ[\w-]+\.eyJ[\w-]+\.[\w-]+/g) || [];
+            apikey = jwts.filter((j) => { try { return JSON.parse(atob(j.split('.')[1].replace(/-/g, '+').replace(/_/g, '/'))).role === 'anon'; } catch (e) { return false; } })[0] || '';
+        } catch (e) { /* no renewal key; the login still works until it expires */ }
+        payload = { v: 1, janitor: { access_token: session.access_token, refresh_token: session.refresh_token, expires_at: session.expires_at, apikey } };
+    }
+    const data = btoa(unescape(encodeURIComponent(JSON.stringify(payload))));
+    if (ST) { location.replace(ST + '/#botbazaar=' + encodeURIComponent(data)); return; }
+    const out = 'bazaar:' + data;
+    if (navigator.clipboard) { navigator.clipboard.writeText(out).then(() => alert('Login copied. Paste it into Bot Bazaar.'), () => prompt('Copy this, then paste into Bot Bazaar:', out)); }
+    else { prompt('Copy this, then paste into Bot Bazaar:', out); }
+}
+
+const buildBookmarklet = () => `javascript:(${botBazaarBookmark.toString()})(${JSON.stringify(location.origin)});void 0`;
+
+const decodeHandoff = (data) => {
+    try { return JSON.parse(decodeURIComponent(escape(atob(decodeURIComponent(data))))); } catch { return null; }
+};
+
+/** Applies a captured login. Returns the sites it connected. */
+async function importLogin(payload, { open = false } = {}) {
+    if (!payload || payload.v !== 1) return [];
+    const connected = [];
+    if (payload.janitor?.access_token) {
+        storeJanitorSession({
+            access_token: payload.janitor.access_token,
+            refresh_token: payload.janitor.refresh_token || '',
+            expires_at: payload.janitor.expires_at,
+            apikey: payload.janitor.apikey || '',
+        });
+        syncState.janitor.at = 0;
+        scheduleRefresh();
+        connected.push('JanitorAI');
+    } else if (typeof payload.janitor === 'string' && extractToken(payload.janitor)) {
+        storeToken(extractToken(payload.janitor));
+        syncState.janitor.at = 0;
+        connected.push('JanitorAI');
+    }
+    if (payload.chub) {
+        const chubUser = await verifyChubKey(payload.chub).catch(() => null);
+        if (chubUser) {
+            storeChubKey(payload.chub, chubUser.user_name || chubUser.name || '');
+            syncState.chub.at = 0;
+            connected.push('Chub');
+        } else {
+            toastr.error('Chub did not accept that login. Sign in on chub.ai and press the bookmark again.', 'Bot Bazaar');
+        }
+    }
+    if (connected.length) {
+        toastr.success(`${connected.join(' and ')} connected.`, 'Bot Bazaar');
+        if (open && !root?.classList.contains('jai_open')) openBrowser();
+        else if (root?.classList.contains('jai_open')) { updateStatus(); if (awaitingLogin) showConnect(); }
+    }
+    return connected;
+}
+
+/** On load, pick up a login the bookmark handed over through the URL fragment, then clear it from the URL. */
+function handleHandoff() {
+    const match = location.hash.match(/botbazaar=([^&]*)/);
+    if (!match) return;
+    try { history.replaceState(null, '', location.pathname + location.search); } catch { /* ignore */ }
+    const payload = decodeHandoff(match[1]);
+    if (payload) importLogin(payload, { open: true });
+}
+
 function addButtons() {
     const external = document.getElementById('external_import_button');
     if (external && !document.getElementById('jai_open_button')) {
@@ -2860,5 +3047,7 @@ function addButtons() {
 
 jQuery(() => {
     addButtons();
+    handleHandoff();
+    scheduleRefresh();
     console.info(TAG, 'loaded');
 });

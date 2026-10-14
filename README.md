@@ -49,18 +49,25 @@ Browsing needs nothing — Chub's API is public. Linked lorebooks are merged wit
 
 ## Connecting your accounts
 
-JanitorAI and Chub don't let other apps sign you in, so Bot Bazaar borrows the login your browser already has,
-using one small bookmark:
+JanitorAI and Chub don't let other apps sign you in, so Bot Bazaar borrows the login your browser already has —
+with **one bookmark**, and **no copy-paste**:
 
-1. One-time: in **Account**, add the **Bot Bazaar** bookmark (computer: drag it to the bookmarks bar;
-   phone: copy the code and save it as a bookmark named `bazaar`).
+1. One-time: in **Account**, add the **Bot Bazaar** bookmark (computer: drag it to the bookmarks bar; phone:
+   **Copy bookmark code**, then make a bookmark named `bazaar` with that code as its address).
 2. Open JanitorAI or Chub (signed in) and press the bookmark.
-3. Come back to SillyTavern — it connects by itself. (If your browser doesn't allow that, paste instead.)
+3. It jumps straight back to SillyTavern and connects by itself — nothing to paste. Works on Android Chrome.
 
-- **JanitorAI** is needed for search, definitions, lorebooks and favorites. Its login lasts about 3 hours.
-- **Chub** is only needed for your Chub favorites — browsing never needs it. Connect once; it doesn't expire.
+The login is handed over inside the page URL's `#` fragment, which browsers never send to any server, and is
+cleared from the address bar immediately. (If you ever need it, the Account panel still has a manual paste box.)
 
-Desktop alternative for JanitorAI with nothing to copy: install [Tampermonkey](https://www.tampermonkey.net/),
+**JanitorAI now stays logged in.** The bookmark also captures the refresh part of your JanitorAI session, so
+Bot Bazaar renews the login in the background the same way janitorai.com does. You connect once and stay
+connected — no more reconnecting every few hours. (If you sign out of JanitorAI in your browser, or it's been
+untouched for a long time, just press the bookmark again.)
+
+- **Chub** only needs connecting for your Chub favorites; browsing never needs it.
+
+Desktop alternative for JanitorAI with nothing to press: install [Tampermonkey](https://www.tampermonkey.net/),
 switch on **Allow User Scripts** for it, and install `janitor-bridge.user.js` from this repository.
 
 Your logins are stored in your SillyTavern settings and this browser, and only sent to janitorai.com and chub.ai —
