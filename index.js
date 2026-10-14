@@ -58,8 +58,30 @@ function tokenExpiry(token) {
     }
 }
 
+const TOKEN_KEY = 'botBazaar.janitorToken';
+
+const readLocalToken = () => {
+    try { return localStorage.getItem(TOKEN_KEY) || ''; } catch { return ''; }
+};
+
+/**
+ * Saves the token twice: in the SillyTavern settings (so other devices get it) and in this browser (because when
+ * SillyTavern is open in several tabs, a tab with older settings can overwrite the saved settings).
+ */
+function storeToken(token) {
+    settings().token = token;
+    ctx().saveSettingsDebounced();
+    try {
+        if (token) localStorage.setItem(TOKEN_KEY, token);
+        else localStorage.removeItem(TOKEN_KEY);
+    } catch { /* storage unavailable */ }
+}
+
 function account() {
-    const token = settings().token || '';
+    // Use whichever copy expires last.
+    const token = [settings().token || '', readLocalToken()]
+        .filter(Boolean)
+        .sort((a, b) => (tokenExpiry(b) ?? 0) - (tokenExpiry(a) ?? 0))[0] || '';
     const expiry = token ? tokenExpiry(token) : null;
     return {
         token,
@@ -1118,6 +1140,7 @@ function buildUi() {
                 <div class="jai_btn jai_icon" id="jai_close" title="Close"><i class="fa-solid fa-xmark"></i></div>
             </div>
             <div class="jai_nav">
+                <div class="jai_navscroll">
                 <div class="jai_tabs" id="jai_kinds">
                     <div class="jai_tab" data-kind="characters"><i class="fa-solid fa-user"></i><span>Characters</span></div>
                     <div class="jai_tab" data-kind="lorebooks"><i class="fa-solid fa-book-atlas"></i><span>Lorebooks</span></div>
@@ -1126,6 +1149,7 @@ function buildUi() {
                 <div class="jai_tabs" id="jai_modes">
                     <div class="jai_tab" data-mode="all"><i class="fa-solid fa-eye"></i><span>All</span></div>
                     <div class="jai_tab" data-mode="sfw"><i class="fa-solid fa-eye-slash"></i><span>Limited only</span></div>
+                </div>
                 </div>
                 <div class="jai_search">
                     <i class="fa-solid fa-magnifying-glass"></i>
@@ -1442,8 +1466,7 @@ async function saveToken() {
         return toastr.warning('That token has already expired. Reload JanitorAI and copy a fresh one.', 'Bot Bazaar');
     }
 
-    settings().token = token;
-    ctx().saveSettingsDebounced();
+    storeToken(token);
     updateStatus();
     showMessage('<i class="fa-solid fa-spinner fa-spin"></i> Checking the token…');
     try {
@@ -1459,8 +1482,7 @@ async function saveToken() {
 }
 
 function disconnect(interactive = true) {
-    settings().token = '';
-    ctx().saveSettingsDebounced();
+    storeToken('');
     updateStatus();
     if (interactive) {
         toastr.info('JanitorAI token removed.', 'Bot Bazaar');

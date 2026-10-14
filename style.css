@@ -1361,3 +1361,267 @@
         grid-template-columns: minmax(0, 1fr);
     }
 }
+
+/* =================================================================================================
+   Phones and small tablets
+   ================================================================================================= */
+
+#jai_browser .jai_navscroll {
+    display: contents;
+}
+
+/* Tag strips on Chub cards scroll by swiping; no scrollbar needed. */
+#jai_browser.jai_theme_chub .jai_card .jai_tags {
+    scrollbar-width: none;
+}
+
+#jai_browser.jai_theme_chub .jai_card .jai_tags::-webkit-scrollbar {
+    display: none;
+}
+
+@media (max-width: 700px) {
+    #jai_browser {
+        font-size: 14px;
+    }
+
+    #jai_browser .jai_header {
+        gap: 6px;
+        padding: 6px 8px 4px;
+    }
+
+    #jai_browser .jai_title {
+        font-size: 16px;
+    }
+
+    #jai_browser .jai_header .jai_tab {
+        padding: 6px 10px;
+    }
+
+    #jai_browser #jai_account span {
+        display: none;
+    }
+
+    #jai_browser .jai_status {
+        font-size: 11px;
+    }
+
+    /* All tab groups share one row you can swipe sideways. */
+    #jai_browser .jai_nav {
+        padding: 4px 8px 8px;
+        gap: 6px;
+    }
+
+    #jai_browser .jai_navscroll {
+        display: flex;
+        flex: 1 1 100%;
+        gap: 6px;
+        min-width: 0;
+        overflow-x: auto;
+        scrollbar-width: none;
+        -webkit-overflow-scrolling: touch;
+    }
+
+    #jai_browser .jai_navscroll::-webkit-scrollbar {
+        display: none;
+    }
+
+    #jai_browser .jai_navscroll .jai_tabs {
+        flex: none;
+    }
+
+    #jai_browser .jai_tab {
+        min-height: 34px;
+        padding: 6px 10px;
+        font-size: 13px;
+    }
+
+    #jai_browser .jai_search {
+        flex: 1 1 0;
+        min-height: 38px;
+    }
+
+    #jai_browser .jai_search input {
+        font-size: 16px; /* stops iOS from zooming in when the field is focused */
+    }
+
+    #jai_browser #jai_tag {
+        max-width: 112px;
+        min-height: 38px;
+        font-size: 13px;
+    }
+
+    #jai_browser .jai_btn {
+        min-height: 38px;
+        padding: 7px 12px;
+    }
+
+    #jai_browser .jai_btn.jai_small {
+        min-height: 32px;
+    }
+
+    #jai_browser .jai_footer .jai_btn {
+        min-width: 84px;
+    }
+
+    #jai_browser .jai_body {
+        padding: 8px;
+    }
+
+    /* ---- JanitorAI grid: two columns of compact cards ---- */
+    #jai_browser:not(.jai_theme_chub) .jai_grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px;
+    }
+
+    #jai_browser:not(.jai_theme_chub) .jai_card_title {
+        font-size: 12px;
+    }
+
+    #jai_browser:not(.jai_theme_chub) .jai_card .jai_blurb {
+        height: 96px;
+        font-size: 11px;
+    }
+
+    #jai_browser:not(.jai_theme_chub) .jai_card_body {
+        min-height: 124px;
+    }
+
+    #jai_browser:not(.jai_theme_chub) .jai_card .jai_tags {
+        height: 54px;
+    }
+
+    #jai_browser .jai_chip {
+        font-size: 11px;
+        padding: 2px 6px;
+    }
+
+    #jai_browser .jai_card_foot {
+        font-size: 10px;
+    }
+
+    /* ---- Character pages ---- */
+    #jai_browser .jai_detail {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 12px;
+    }
+
+    #jai_browser .jai_detail_main {
+        width: 100%;
+        padding: 12px;
+    }
+
+    #jai_browser .jai_detail_side {
+        position: static;
+        width: 100%;
+        flex-basis: auto;
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    #jai_browser .jai_detail_side img {
+        grid-column: 1 / -1;
+        max-height: 42vh;
+        object-fit: contain;
+    }
+
+    #jai_browser .jai_detail_side .jai_import {
+        grid-column: 1 / -1;
+    }
+
+    #jai_browser .jai_detail_title {
+        font-size: 20px;
+    }
+
+    #jai_browser .jai_statline span {
+        padding: 2px 8px;
+        font-size: 12px;
+    }
+
+    #jai_browser .jai_books_grid {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    /* JanitorAI page: one column, with the buttons pinned to the top while you scroll. */
+    #jai_browser .jai_jdetail {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+    }
+
+    #jai_browser .jai_jright {
+        display: contents;
+    }
+
+    #jai_browser .jai_jactions {
+        order: -1;
+        position: sticky;
+        top: -8px;
+        z-index: 5;
+        margin: -8px -8px 0;
+        padding: 8px;
+        background: var(--jai-bg);
+        box-shadow: 0 6px 12px rgba(0, 0, 0, 0.35);
+    }
+
+    #jai_browser .jai_jactions .jai_primary {
+        flex: 1 1 100%;
+    }
+
+    #jai_browser .jai_jactions .jai_btn:not(.jai_primary) {
+        flex: 1 1 0;
+    }
+
+    #jai_browser .jai_jcard {
+        padding: 10px;
+    }
+
+    #jai_browser .jai_jcard .jai_detail_title {
+        font-size: 22px;
+    }
+
+    #jai_browser .jai_jimage img {
+        max-height: 50vh;
+    }
+
+    /* Creator pages designed for wide screens: cap fixed widths, and scroll sideways if something still won't fit. */
+    #jai_browser .jai_authored {
+        overflow-x: auto;
+        overflow-y: hidden;
+    }
+
+    #jai_browser .jai_authored * {
+        max-width: 100% !important;
+        box-sizing: border-box;
+    }
+
+    #jai_browser .jai_authored img {
+        height: auto;
+    }
+
+    /* ---- creator banner, comments, account panel ---- */
+    #jai_browser .jai_creator_name {
+        font-size: 18px;
+    }
+
+    #jai_browser .jai_comment_avatar {
+        width: 30px;
+        height: 30px;
+    }
+
+    #jai_browser .jai_section_title .jai_btn {
+        margin-left: 0;
+    }
+
+    #jai_browser .jai_message {
+        font-size: 14px;
+    }
+
+    #jai_browser .jai_message li .jai_btn {
+        min-height: 32px;
+    }
+
+    #jai_browser #jai_token {
+        font-size: 16px;
+    }
+}
