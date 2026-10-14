@@ -1,11 +1,13 @@
 /*
  * Bot Bazaar — SillyTavern extension
  *
- *  • Browse and search JanitorAI and Chub from inside SillyTavern.
+ *  • Browse and search JanitorAI, Chub and Saucepan from inside SillyTavern.
  *  • Import characters with their full definition, greetings, tags, avatar and lorebooks, or import lorebooks alone.
  *
  * Everything runs in the browser.
  *  - Chub's API is public, so it needs nothing.
+ *  - Saucepan only answers its own website, so it goes through SillyTavern's built-in CORS proxy; definitions and
+ *    lorebooks need the user's Saucepan login (captured by the same bookmark).
  *  - JanitorAI only gives definitions and lorebooks to a signed-in account, so the user connects their account by
  *    pasting a login token (stored in the extension settings, sent only to janitorai.com), or installs the optional
  *    helper userscript (janitor-bridge.user.js). Definitions and lorebooks the creator keeps private stay private.
@@ -1065,6 +1067,417 @@ async function verifyChubKey(key) {
     return account && Number(account.id) > 0 ? account : null;
 }
 
+// ---------------------------------------------------------------------------------------------- Saucepan
+
+const SAUCE = 'https://saucepan.ai';
+const SAUCE_PAGE_SIZE = 24;
+const SAUCE_KEY_STORE = 'botBazaar.sauceToken';
+
+/**
+ * Saucepan's API only answers its own website inside a browser, so requests go through SillyTavern's built-in CORS
+ * proxy (config.yaml: enableCorsProxy: true). That proxy forwards only the path, so the query is encoded into it.
+ */
+function sauceUrl(path) {
+    const i = path.indexOf('?');
+    return i < 0 ? `/proxy/${SAUCE}${path}` : `/proxy/${SAUCE}${path.slice(0, i)}${encodeURIComponent(path.slice(i))}`;
+}
+
+const sauceImage = (id, variant = 'thumbnail') => (id ? `${SAUCE}/cdn/${encodeURIComponent(id)}/${variant}` : '');
+const saucePage = (id, kind = 'character') => `${SAUCE}/${kind === 'lorebook' ? 'lorebook' : 'companion'}/${encodeURIComponent(id)}`;
+// Saucepan writes dates as "2025-08-25 21:47:00.046113 +00:00:00".
+const sauceDate = (text) => {
+    const m = str(text).match(/^(\d{4}-\d\d-\d\d)[ T](\d\d:\d\d:\d\d)(\.\d+)?/);
+    return m ? `${m[1]}T${m[2]}${m[3] ? m[3].slice(0, 4) : ''}Z` : str(text);
+};
+const prettyTag = (tag) => str(tag).replace(/_/g, ' ').replace(/\bpov\b/gi, 'POV').trim();
+
+function sauceAccount() {
+    let token = settings().sauceToken || '';
+    try { token = localStorage.getItem(SAUCE_KEY_STORE) || token; } catch { /* storage unavailable */ }
+    return { token, user: settings().sauceUser || '', userId: settings().sauceUserId || '', verified: settings().sauceVerified !== false };
+}
+
+function storeSauceToken(token, user = {}) {
+    settings().sauceToken = token;
+    settings().sauceUser = user.handle || '';
+    settings().sauceUserId = user.id || '';
+    settings().sauceVerified = user.is_verified !== false;
+    ctx().saveSettingsDebounced();
+    try {
+        if (token) localStorage.setItem(SAUCE_KEY_STORE, token);
+        else localStorage.removeItem(SAUCE_KEY_STORE);
+    } catch { /* storage unavailable */ }
+}
+
+/** null = not checked yet, true = SillyTavern's proxy works, false = it is switched off. */
+let sauceProxyOk = null;
+
+/**
+ * One Saucepan API call. GET without a body, POST with one.
+ * @param {string} path e.g. "/api/v1/search"
+ * @param {object|null} [body]
+ * @param {{token?: string}} [options] use this login instead of the saved one
+ */
+async function sauceFetch(path, body = null, { token = sauceAccount().token } = {}) {
+    const headers = {
+        // SillyTavern checks this on its own side; its proxy removes it before forwarding.
+        'X-CSRF-Token': ctx().getRequestHeaders()['X-CSRF-Token'],
+        Accept: 'application/json',
+        'cf-edge-token-8af3': 'e3b0c44298fc1c14',
+    };
+    if (body) headers['Content-Type'] = 'application/json';
+    if (token) headers.Authorization = `Bearer ${token}`;
+    let response;
+    try {
+        response = await fetch(sauceUrl(path), { method: body ? 'POST' : 'GET', headers, body: body ? JSON.stringify(body) : undefined, cache: 'no-store' });
+    } catch {
+        throw new ApiError('network', 'Could not reach SillyTavern.');
+    }
+    const text = await response.text();
+    if (/CORS proxy is disabled/i.test(text)) {
+        sauceProxyOk = false;
+        throw new ApiError('proxy', 'SillyTavern\'s proxy is switched off.');
+    }
+    if (!/^\s*[{[]/.test(text)) {
+        if (response.status === 403 && /csrf/i.test(text)) {
+            sauceProxyOk = false;
+            throw new ApiError('proxy', 'SillyTavern\'s proxy is switched off.');
+        }
+        throw new ApiError('http', `Saucepan sent an unexpected answer (${response.status}). ${text.slice(0, 120)}`);
+    }
+    sauceProxyOk = true;
+    const data = JSON.parse(text);
+    if (!response.ok) {
+        const code = str(data?.error?.code);
+        const error = new ApiError(response.status === 401 ? 'auth' : 'http', str(data?.error?.message) || `Saucepan answered with an error (${response.status}).`);
+        error.status = response.status;
+        error.sauceCode = code;
+        throw error;
+    }
+    return data;
+}
+
+/** Checks a Saucepan login; returns the account (handle, id, is_verified) or null. */
+async function verifySauceToken(token) {
+    const me = await sauceFetch('/api/v1/users/me', null, { token });
+    const user = me?.user || me;
+    return user?.id ? user : null;
+}
+
+/** Turns a Saucepan search result (companion) into the shared card model. */
+function sauceModel(c) {
+    return {
+        source: 'saucepan',
+        id: c.id,
+        kind: 'character',
+        name: str(c.display_name) || str(c.name),
+        image: sauceImage(c.image?.id),
+        creatorId: c.author_id,
+        creatorName: c.author_handle,
+        blurb: str(c.short_description),
+        tags: Array.isArray(c.tags) ? c.tags : [],
+        chats: c.chat_count,
+        messages: c.interaction_count,
+        favs: c.favorite_count,
+        books: Number(c.lorebook_count) || 0,
+        scenarios: Number(c.scenario_count) || 0,
+        portraits: Number(c.portrait_count) || 0,
+        tokens: c.card_token_count,
+        nsfw: !!c.sus,
+        updated: sauceDate(c.updated_at || c.posted_at),
+        raw: c,
+    };
+}
+
+function sauceBookModel(b) {
+    return {
+        source: 'saucepan',
+        id: b.id,
+        kind: 'lorebook',
+        name: str(b.name),
+        image: sauceImage(b.image_id),
+        creatorId: b.owner_id,
+        creatorName: b.owner_handle,
+        blurb: str(b.short_description),
+        tags: Array.isArray(b.tags) ? b.tags : [],
+        favs: b.favorite_count,
+        chapters: b.chapter_count,
+        words: b.total_word_count,
+        uses: b.public_companions,
+        nsfw: !!b.nsfw,
+        protection: str(b.definition_protection),
+        updated: sauceDate(b.updated_at || b.posted_at),
+        raw: b,
+    };
+}
+
+// What the list showed, so a page can draw at once and favorites can open lorebooks.
+const sauceSeen = new Map();
+
+const SAUCE_LORE_SORT = { trending: 'favorite_count', popularity: 'companion_count', created: 'posted_at', updated: 'updated', random: 'random' };
+
+async function sauceList() {
+    if (state.search && !sauceAccount().token) {
+        throw new ApiError('auth', 'Searching Saucepan by text needs your Saucepan login. Tags and creators work without one.');
+    }
+    const offset = (state.page - 1) * SAUCE_PAGE_SIZE;
+    const body = { asc: false, offset, limit: SAUCE_PAGE_SIZE, sus: state.mode !== 'sfw' };
+    if (state.search) body.text_search = state.search;
+    if (state.topic) body.cnf_tags = [[state.topic]];
+
+    if (state.kind === 'lorebooks') {
+        body.order_by = SAUCE_LORE_SORT[state.sort] || 'favorite_count';
+        const result = await sauceFetch('/api/v1/search/lorebooks', body);
+        const items = (Array.isArray(result?.lorebooks) ? result.lorebooks : []).map(sauceBookModel);
+        items.forEach(m => sauceSeen.set(m.id, m));
+        return { items, total: Number(result?.total_count) || items.length, size: SAUCE_PAGE_SIZE };
+    }
+
+    body.order_by = state.sort;
+    if (state.sauceBooks) body.min_lorebook_count = 1;
+    if (state.creator) {
+        if (!state.creator.id && state.creator.name) {
+            const found = await sauceFetch(`/api/v1/user?handle=${encodeURIComponent(state.creator.name)}`);
+            state.creator.id = found?.user?.id || '';
+        }
+        body.special_view = { view: 'user_profile', user_id: state.creator.id };
+    }
+    const result = await sauceFetch('/api/v1/search', body);
+    const items = (Array.isArray(result?.companions) ? result.companions : []).map(sauceModel);
+    items.forEach(m => sauceSeen.set(m.id, m));
+    return { items, total: Number(result?.total_count) || items.length, size: SAUCE_PAGE_SIZE };
+}
+
+/** The definition object inside whatever wrapper Saucepan sends it in. */
+function sauceDefinition(data) {
+    const fields = ['card', 'example_dialogue', 'advanced_prompt', 'formatting_instructions', 'starting_scenarios'];
+    const walk = (node, depth = 0) => {
+        if (!node || typeof node !== 'object' || depth > 4) return null;
+        if (!Array.isArray(node) && fields.some(f => f in node)) return node;
+        for (const value of Object.values(node)) {
+            const found = walk(value, depth + 1);
+            if (found) return found;
+        }
+        return null;
+    };
+    return walk(data);
+}
+
+// Only plain text is used; anything Saucepan sends in another form is left out.
+const sauceText = (value) => (typeof value === 'string' ? value : '');
+
+function sauceGreetings(def) {
+    return (Array.isArray(def?.starting_scenarios) ? def.starting_scenarios : [])
+        .map(s => (typeof s === 'string' ? s : sauceText(s?.message)))
+        .filter(t => t.trim());
+}
+
+const sauceHasDefinition = (def) => !!(sauceText(def?.card).trim() || sauceText(def?.example_dialogue).trim());
+
+/**
+ * Fetches the definition with the user's own login. Saucepan only sends it when the creator made it open (or the
+ * account may otherwise see it); a hidden definition stays hidden.
+ * @returns {Promise<{status: 'ok'|'hidden'|'login'|'unverified'|'failed', def?: object, message?: string}>}
+ */
+async function fetchSauceDefinition(id) {
+    if (!sauceAccount().token) return { status: 'login' };
+    try {
+        const def = sauceDefinition(await sauceFetch(`/api/v1/companion/definition?companion_id=${encodeURIComponent(id)}`));
+        return def ? { status: 'ok', def } : { status: 'hidden' };
+    } catch (error) {
+        if (error.code === 'proxy') throw error;
+        if (error.code === 'auth') return { status: 'login', message: error.message };
+        if (/verif/i.test(error.message) || (!sauceAccount().verified && error.status === 403)) return { status: 'unverified', message: error.message };
+        if (error.status === 403 || error.status === 404) return { status: 'hidden', message: error.message };
+        return { status: 'failed', message: error.message };
+    }
+}
+
+/** Lorebooks attached to a character (needs the login). */
+async function sauceAttachedBooks(id) {
+    const result = await sauceFetch(`/api/v2/companions/${encodeURIComponent(id)}/lorebooks`);
+    return Array.isArray(result?.lorebooks) ? result.lorebooks : [];
+}
+
+/** Finds lorebook entries ("chapters" on Saucepan) in a lorebook answer and normalises them for convertEntry(). */
+function sauceEntries(data) {
+    const generic = findEntries(data);
+    if (generic?.length) return generic;
+    const TEXT = ['content', 'text', 'body', 'entry', 'description', 'prompt'];
+    let best = null;
+    const walk = (node, depth = 0) => {
+        if (!node || typeof node !== 'object' || depth > 5) return;
+        if (Array.isArray(node)) {
+            const objects = node.filter(v => v && typeof v === 'object' && !Array.isArray(v));
+            if (objects.length && objects.some(o => TEXT.some(f => typeof o[f] === 'string' && o[f].trim())) && (!best || objects.length > best.length)) best = objects;
+            node.forEach(v => walk(v, depth + 1));
+            return;
+        }
+        Object.values(node).forEach(v => walk(v, depth + 1));
+    };
+    walk(data);
+    if (!best) return [];
+    return best.map((o) => {
+        const keyField = Object.keys(o).find(k => /key|trigger|word|activation/i.test(k) && (Array.isArray(o[k]) || typeof o[k] === 'string'));
+        return {
+            ...o,
+            content: str(TEXT.map(f => o[f]).find(v => typeof v === 'string' && v.trim())),
+            keys: keyField ? toList(o[keyField]) : [],
+            comment: str(o.name || o.title || o.label),
+        };
+    }).filter(e => e.content.trim());
+}
+
+const sauceBookCache = new Map();
+
+/**
+ * Downloads one Saucepan lorebook with the user's login.
+ * @returns {Promise<{status: 'ok'|'private'|'failed', entries?: object[], name?: string}>}
+ */
+async function fetchSauceLorebook(id) {
+    if (sauceBookCache.has(id)) return sauceBookCache.get(id);
+    let result;
+    try {
+        const data = await sauceFetch(`/api/v1/lorebooks/${encodeURIComponent(id)}`);
+        const entries = sauceEntries(data);
+        result = entries.length ? { status: 'ok', entries, name: str(data?.lorebook?.name || data?.name) } : { status: 'private' };
+    } catch (error) {
+        if (error.code === 'proxy') throw error;
+        console.warn(TAG, 'Saucepan lorebook failed', id, error);
+        const refused = error.status === 403 || error.status === 404;
+        // Unverified accounts are refused everything, so don't blame the creator for that.
+        result = { status: refused ? (sauceAccount().verified ? 'private' : 'unverified') : 'failed', message: error.message };
+    }
+    sauceBookCache.set(id, result);
+    return result;
+}
+
+/** Every readable lorebook attached to a Saucepan character, merged into one V2 character_book. */
+async function sauceBook(id, bookName, attached = null) {
+    const warnings = [];
+    const entries = [];
+    if (!sauceAccount().token) return { book: null, warnings };
+    let books = attached;
+    try {
+        books ??= await sauceAttachedBooks(id);
+    } catch (error) {
+        if (error.code === 'proxy') throw error;
+        warnings.push(`The lorebooks could not be listed: ${error.message}`);
+        return { book: null, warnings };
+    }
+    const closed = [];
+    const failed = [];
+    for (const b of books) {
+        const result = await fetchSauceLorebook(b.id);
+        if (result.status === 'ok') result.entries.forEach(entry => entries.push(convertEntry(entry, entries.length)));
+        else if (result.status === 'unverified') failed.push(str(b.name) || 'lorebook');
+        else (result.status === 'private' ? closed : failed).push(str(b.name) || 'lorebook');
+    }
+    if (closed.length) warnings.push(`Saucepan did not send the contents of ${nameList(closed)} (kept private by the creator, or your account can't read it yet), so ${closed.length > 1 ? 'they were' : 'it was'} skipped.`);
+    if (failed.length) warnings.push(sauceAccount().verified ? `Could not download ${nameList(failed)} from Saucepan right now.` : `Saucepan only sends lorebooks to accounts with a verified email, so ${nameList(failed)} could not be imported. Verify your email on saucepan.ai.`);
+    if (!entries.length) return { book: null, warnings };
+    return { book: { name: bookName, description: `Imported from Saucepan (${id})`, extensions: {}, entries }, warnings };
+}
+
+function buildSauceCard(c, def, book) {
+    const greetings = sauceGreetings(def);
+    const system = [sauceText(def?.advanced_prompt), sauceText(def?.formatting_instructions)].filter(t => t.trim()).join('\n\n');
+    const defined = sauceHasDefinition(def);
+    return {
+        spec: 'chara_card_v2',
+        spec_version: '2.0',
+        data: {
+            name: safeName(c.display_name || c.name) || 'Saucepan character',
+            // Without the definition, the public blurb is the best there is.
+            description: defined ? sauceText(def.card) : str(c.short_description),
+            personality: '',
+            scenario: '',
+            first_mes: greetings[0] || '',
+            mes_example: sauceText(def?.example_dialogue),
+            creator_notes: sauceText(def?.full_description) || str(c.short_description),
+            system_prompt: system,
+            post_history_instructions: '',
+            alternate_greetings: greetings.slice(1),
+            tags: (Array.isArray(c.tags) ? c.tags : []).map(prettyTag).filter(Boolean),
+            creator: str(c.author_handle),
+            character_version: '',
+            extensions: {
+                talkativeness: '0.5',
+                fav: false,
+                world: book ? book.name : '',
+                depth_prompt: { prompt: '', depth: 4, role: 'system' },
+                saucepan: { id: c.id, author_id: c.author_id, source: saucePage(c.id), definition: defined },
+            },
+            ...(book ? { character_book: book } : {}),
+        },
+    };
+}
+
+/** @param {object} c companion  @param {object|null} defResult result of fetchSauceDefinition() */
+async function importSauceCharacter(c, defResult = null) {
+    const { Popup } = ctx();
+    const name = safeName(c.display_name || c.name) || 'Saucepan character';
+    defResult ??= await fetchSauceDefinition(c.id);
+    const def = defResult.status === 'ok' ? defResult.def : null;
+    if (!sauceHasDefinition(def)) {
+        const why = {
+            login: 'Your Saucepan account is not connected, so the definition and lorebooks are not available.',
+            unverified: 'Saucepan only sends definitions to accounts with a verified email. Verify your email on saucepan.ai, then try again.',
+            hidden: 'The creator keeps this definition hidden, so Saucepan does not send it.',
+            failed: `Saucepan did not send the definition (${defResult.message || 'unknown error'}).`,
+            ok: 'Saucepan sent an empty definition.',
+        }[defResult.status];
+        const proceed = await Popup.show.confirm('Definition not available', `${why} Import only the public info (name, picture, short description, tags)?`);
+        if (!proceed) return false;
+    }
+    const { book, warnings } = await sauceBook(c.id, `${name} (Saucepan Lorebook)`);
+    await finishImport(buildSauceCard(c, def, book), book, sauceImage(c.image?.id, 'public'), name, warnings);
+    return true;
+}
+
+async function fetchSauceFavorites() {
+    const items = [];
+    for (let page = 0; page < 40; page++) {
+        const result = await sauceFetch('/api/v1/search', { special_view: { view: 'favorites' }, order_by: 'favorited_at', asc: false, offset: page * SAUCE_PAGE_SIZE, limit: SAUCE_PAGE_SIZE, sus: true });
+        const list = Array.isArray(result?.companions) ? result.companions : [];
+        items.push(...list.map((c) => {
+            const m = sauceModel(c);
+            return { source: 'saucepan', id: m.id, name: m.name, image: m.image, creator: m.creatorName, creatorId: m.creatorId, kind: 'character' };
+        }));
+        if (list.length < SAUCE_PAGE_SIZE) break;
+    }
+    try {
+        for (let page = 0; page < 20; page++) {
+            const result = await sauceFetch('/api/v1/search/favorited-lorebooks', { order_by: 'favorited_at', asc: false, offset: page * SAUCE_PAGE_SIZE, limit: SAUCE_PAGE_SIZE, sus: true });
+            const list = Array.isArray(result?.lorebooks) ? result.lorebooks : [];
+            items.push(...list.map((b) => {
+                const m = sauceBookModel(b);
+                sauceSeen.set(m.id, m);
+                return { source: 'saucepan', id: m.id, name: m.name, image: m.image, creator: m.creatorName, creatorId: m.creatorId, kind: 'lorebook' };
+            }));
+            if (list.length < SAUCE_PAGE_SIZE) break;
+        }
+    } catch (error) {
+        console.warn(TAG, 'Saucepan lorebook favorites skipped', error);
+    }
+    return items;
+}
+
+const sauceComment = (c) => ({
+    source: 'saucepan',
+    id: c.id,
+    user: c.user_handle || 'user',
+    userId: c.user_id,
+    avatar: sauceImage(c.user_avatar?.id),
+    verified: false,
+    pinned: !!c.pinned_at,
+    date: sauceDate(c.created_at),
+    text: str(c.content),
+    likes: c.favorite_count,
+    replyCount: Array.isArray(c.replies) ? c.replies.length : 0,
+    replies: Array.isArray(c.replies) ? c.replies : [],
+});
+
 // ---------------------------------------------------------------------------------------------- favorites
 
 // Kept as a small file in SillyTavern's user files: shared by every device using this SillyTavern, and not
@@ -1174,10 +1587,11 @@ async function fetchChubFavorites() {
 
 // ---- automatic sync: whenever the Favorites tab is open, and every few minutes while it stays open
 
-const syncState = { janitor: { at: 0, busy: false, error: '' }, chub: { at: 0, busy: false, error: '' } };
+const SYNC_SITES = ['janitor', 'chub', 'saucepan'];
+const syncState = Object.fromEntries(SYNC_SITES.map(site => [site, { at: 0, busy: false, error: '' }]));
 let syncTimer = null;
 
-const siteConnected = (site) => (site === 'janitor' ? signedIn() : !!chubAccount().key);
+const siteConnected = (site) => ({ janitor: () => signedIn(), chub: () => !!chubAccount().key, saucepan: () => !!sauceAccount().token && sauceProxyOk !== false }[site]?.() ?? false);
 
 async function syncSite(site, force = false) {
     const s = syncState[site];
@@ -1187,13 +1601,13 @@ async function syncSite(site, force = false) {
     renderSyncBar();
     try {
         await loadFavorites();
-        const items = site === 'chub' ? await fetchChubFavorites() : await fetchJanitorFavorites();
+        const items = await { janitor: fetchJanitorFavorites, chub: fetchChubFavorites, saucepan: fetchSauceFavorites }[site]();
         const result = mergeFavorites(site, items);
         s.at = Date.now();
         return result;
     } catch (error) {
         console.warn(TAG, 'Favorites sync failed', site, error);
-        s.error = error.code === 'auth' ? 'login needed' : 'could not sync';
+        s.error = error.code === 'auth' ? 'login needed' : (error.code === 'proxy' ? 'proxy off' : 'could not sync');
         return null;
     } finally {
         s.busy = false;
@@ -1203,7 +1617,7 @@ async function syncSite(site, force = false) {
 }
 
 async function autoSync(force = false) {
-    const results = await Promise.all(['janitor', 'chub'].map(site => syncSite(site, force)));
+    const results = await Promise.all(SYNC_SITES.map(site => syncSite(site, force)));
     const added = results.reduce((n, r) => n + (r?.added || 0), 0);
     if (added) toastr.info(`${added} new favorite${added > 1 ? 's' : ''} from your accounts.`, 'Bot Bazaar', { timeOut: 2500 });
 }
@@ -1238,7 +1652,7 @@ function syncPill(site) {
 
 function renderSyncBar() {
     const bar = root?.querySelector('.jai_syncbar');
-    if (bar) bar.innerHTML = `${syncPill('janitor')}${syncPill('chub')}<span class="jai_btn jai_small" data-sync-now title="Check both sites now"><i class="fa-solid fa-rotate"></i><span>Sync now</span></span>`;
+    if (bar) bar.innerHTML = `${SYNC_SITES.map(syncPill).join('')}<span class="jai_btn jai_small" data-sync-now title="Check every site now"><i class="fa-solid fa-rotate"></i><span>Sync now</span></span>`;
 }
 
 const favButton = (item) => {
@@ -1263,16 +1677,16 @@ function refreshFavButtons() {
 // ---------------------------------------------------------------------------------------------- local views
 
 
-const SOURCE_LABEL = { janitor: 'JanitorAI', chub: 'Chub' };
+const SOURCE_LABEL = { janitor: 'JanitorAI', chub: 'Chub', saucepan: 'Saucepan' };
 
 const matchesLocal = (item) => (state.localSource === 'all' || item.source === state.localSource)
     && (!state.search || `${item.name} ${item.creator}`.toLowerCase().includes(state.search.toLowerCase()));
 
 function siteFilter() {
-    const counts = { all: 0, janitor: 0, chub: 0 };
+    const counts = { all: 0, janitor: 0, chub: 0, saucepan: 0 };
     return (list) => {
         list.forEach((item) => { counts.all++; counts[item.source] = (counts[item.source] || 0) + 1; });
-        return ['all', 'janitor', 'chub'].map(s => `<span class="jai_seg ${state.localSource === s ? 'jai_active' : ''}" data-lsource="${s}">${s === 'all' ? 'All' : SOURCE_LABEL[s]} <i>${counts[s] || 0}</i></span>`).join('');
+        return ['all', ...SYNC_SITES].map(s => `<span class="jai_seg ${state.localSource === s ? 'jai_active' : ''}" data-lsource="${s}">${s === 'all' ? 'All' : SOURCE_LABEL[s]} <i>${counts[s] || 0}</i></span>`).join('');
     };
 }
 
@@ -1301,7 +1715,7 @@ async function renderFavorites() {
         </div>`).join('');
     showMessage(items.length ? '' : (favorites.length
         ? 'Nothing matches.'
-        : 'No favorites yet. Tap the ☆ star on any character — or connect your JanitorAI / Chub account and the favorites you set on those sites appear here by themselves.'));
+        : 'No favorites yet. Tap the ☆ star on any character — or connect your JanitorAI, Chub or Saucepan account and the favorites you set on those sites appear here by themselves.'));
 }
 
 /** Characters this extension imported, read straight from SillyTavern's character list. */
@@ -1309,13 +1723,14 @@ function libraryItems() {
     const { characters, getThumbnailUrl } = ctx();
     return characters.map((c, index) => {
         const ext = c.data?.extensions || {};
-        const source = ext.janitor ? 'janitor' : (ext.chub?.full_path ? 'chub' : null);
+        const source = ext.janitor ? 'janitor' : (ext.chub?.full_path ? 'chub' : (ext.saucepan?.id ? 'saucepan' : null));
         if (!source) return null;
         return {
             index,
             avatar: c.avatar,
             source,
-            id: source === 'janitor' ? ext.janitor.id : ext.chub.full_path,
+            id: { janitor: ext.janitor?.id, chub: ext.chub?.full_path, saucepan: ext.saucepan?.id }[source],
+            creatorId: source === 'saucepan' ? ext.saucepan.author_id || '' : '',
             name: c.name,
             image: getThumbnailUrl('avatar', c.avatar),
             creator: c.data?.creator || '',
@@ -1347,7 +1762,7 @@ function renderLibrary() {
                 <div class="jai_row_name">${esc(item.name)}</div>
                 <div class="jai_row_meta">
                     <span class="jai_site jai_site_${esc(item.source)}">${SOURCE_LABEL[item.source]}</span>
-                    ${item.creator ? `<span class="jai_creator_link" data-creator="${esc(item.source === 'chub' ? item.creator : '')}" data-name="${esc(item.creator)}" data-source="${esc(item.source)}">@${esc(item.creator)}</span>` : ''}
+                    ${item.creator ? `<span class="jai_creator_link" data-creator="${esc(item.source === 'chub' ? item.creator : item.creatorId)}" data-name="${esc(item.creator)}" data-source="${esc(item.source)}">@${esc(item.creator)}</span>` : ''}
                     ${item.date ? `<span title="${esc(fullDate(new Date(item.date).toISOString()))}"><i class="fa-regular fa-clock"></i> ${esc(timeAgo(new Date(item.date).toISOString()))}</span>` : ''}
                     ${item.world ? `<span class="jai_row_book" title="${esc(item.world)}"><i class="fa-solid fa-book-atlas"></i> lorebook</span>` : ''}
                 </div>
@@ -1395,9 +1810,16 @@ const SORTS = {
         ['last_activity_at', 'fa-rotate', 'Updated'],
         ['default', 'fa-bullseye', 'Best match'],
     ],
+    saucepan: [
+        ['trending', 'fa-fire', 'Trending'],
+        ['popularity', 'fa-star', 'Popular'],
+        ['created', 'fa-clock', 'Newest'],
+        ['updated', 'fa-rotate', 'Updated'],
+        ['random', 'fa-shuffle', 'Surprise me'],
+    ],
 };
-const DEFAULT_SORT = { janitor: 'popular', chub: 'trending_downloads' };
-const CREATOR_SORT = { janitor: 'latest', chub: 'created_at' };
+const DEFAULT_SORT = { janitor: 'popular', chub: 'trending_downloads', saucepan: 'trending' };
+const CREATOR_SORT = { janitor: 'latest', chub: 'created_at', saucepan: 'created' };
 const SEARCH_SORT = { janitor: 'relevance', chub: 'default' };
 const SOURCE_KEY = 'botBazaar.source';
 const isLocalView = () => state.source === 'favorites' || state.source === 'library';
@@ -1406,11 +1828,11 @@ const state = {
     source: 'janitor', kind: 'characters',
     page: 1, sort: 'popular', mode: 'all', search: '', tag: '', customTag: '', topic: '', creator: null,
     total: 0, size: 0, loading: false, tagsLoaded: false, detail: null, detailSource: null,
-    localSource: 'all', librarySort: 'new',
+    localSource: 'all', librarySort: 'new', sauceBooks: false,
 };
 try {
     const saved = localStorage.getItem(SOURCE_KEY);
-    if (['chub', 'favorites', 'library'].includes(saved)) {
+    if (['chub', 'saucepan', 'favorites', 'library'].includes(saved)) {
         state.source = saved;
         state.sort = DEFAULT_SORT[saved] || state.sort;
     }
@@ -1636,6 +2058,7 @@ function buildUi() {
                 <div class="jai_tabs jai_sources" id="jai_sources">
                     <div class="jai_tab" data-source="janitor" title="Browse JanitorAI"><span>JanitorAI</span></div>
                     <div class="jai_tab" data-source="chub" title="Browse Chub (chub.ai)"><span>Chub</span></div>
+                    <div class="jai_tab" data-source="saucepan" title="Browse Saucepan (saucepan.ai)"><span>Saucepan</span></div>
                     <div class="jai_tab" data-source="favorites" title="Your favorites from both sites"><i class="fa-solid fa-star"></i><span>Favorites</span></div>
                     <div class="jai_tab" data-source="library" title="Characters you imported with Bot Bazaar"><i class="fa-solid fa-swatchbook"></i><span>Library</span></div>
                 </div>
@@ -1653,11 +2076,12 @@ function buildUi() {
                 <div class="jai_tabs" id="jai_modes">
                     <div class="jai_tab" data-mode="all"><i class="fa-solid fa-eye"></i><span>All</span></div>
                     <div class="jai_tab" data-mode="sfw"><i class="fa-solid fa-eye-slash"></i><span>Limited only</span></div>
+                    <div class="jai_tab" data-sauce-books title="Only characters with a lorebook"><i class="fa-solid fa-book-atlas"></i><span>With lorebook</span></div>
                 </div>
                 </div>
                 <div class="jai_search">
                     <i class="fa-solid fa-magnifying-glass"></i>
-                    <input id="jai_search" type="search" placeholder="Search… or paste a JanitorAI / Chub link">
+                    <input id="jai_search" type="search" placeholder="Search… or paste a JanitorAI / Chub / Saucepan link">
                 </div>
                 <select id="jai_tag"><option value="">Any tag</option></select>
             </div>
@@ -1683,7 +2107,8 @@ function buildUi() {
     $('#jai_tag').addEventListener('change', () => { state.tag = $('#jai_tag').value; state.page = 1; loadList(); });
     $('#jai_sources').addEventListener('click', (event) => {
         const source = event.target.closest('[data-source]')?.dataset.source;
-        if (source && source !== state.source && !state.loading) switchSource(source);
+        // Allowed even while a list is loading: loadList() ignores answers to older requests.
+        if (source && source !== state.source) switchSource(source);
     });
     $('#jai_kinds').addEventListener('click', (event) => {
         const kind = event.target.closest('[data-kind]')?.dataset.kind;
@@ -1700,6 +2125,11 @@ function buildUi() {
         loadList();
     });
     $('#jai_modes').addEventListener('click', (event) => {
+        if (event.target.closest('[data-sauce-books]') && !state.loading) {
+            state.sauceBooks = !state.sauceBooks;
+            state.page = 1;
+            return loadList();
+        }
         const mode = event.target.closest('[data-mode]')?.dataset.mode;
         if (!mode || state.loading) return;
         state.mode = mode;
@@ -1788,6 +2218,12 @@ function buildUi() {
         if (action === 'retry') retry();
         if (action === 'open') openSite();
         if (action === 'open-chub') window.open(CHUB_SITE, 'jai_chub');
+        if (action === 'open-sauce') window.open(SAUCE, 'jai_sauce');
+        if (action === 'disconnect-sauce') {
+            storeSauceToken('');
+            toastr.info('Saucepan account disconnected.', 'Bot Bazaar');
+            showConnect();
+        }
         if (action === 'save') saveToken();
         if (action === 'paste') pasteToken();
         if (action === 'disconnect') disconnect();
@@ -1803,7 +2239,7 @@ function buildUi() {
 
 const openSite = () => window.open(SITE, 'jai_site');
 const hasNext = () => state.size > 0 && state.page * state.size < state.total;
-const openItem = (source, id) => (source === 'chub' ? openChubDetail(id) : openDetail(id));
+const openItem = (source, id) => ({ chub: openChubDetail, saucepan: openSauceDetail }[source] || openDetail)(id);
 
 function resetFilters() {
     state.page = 1;
@@ -1829,6 +2265,20 @@ function submitSearch() {
     const chub = text.match(/(?:chub\.ai|characterhub\.org)\/(characters|lorebooks)\/([^/?#\s]+\/[^/?#\s]+)/i);
     const janitorCharacter = /janitorai\.com\/characters\//i.test(text) || /^[0-9a-f-]{36}$/i.test(text) ? text.match(UUID)?.[0] : null;
     const janitorProfile = /janitorai\.com\/profiles\//i.test(text) ? text.match(UUID)?.[0] : null;
+    const sauce = text.match(/saucepan\.ai\/(companion|lorebook)\/([0-9a-f-]{36})/i);
+    const sauceUser = text.match(/saucepan\.ai\/(?:u|user)\/([^/?#\s]+)/i);
+
+    if (sauce || sauceUser) {
+        $('#jai_search').value = state.search;
+        if (state.source !== 'saucepan') {
+            state.source = 'saucepan';
+            state.sort = DEFAULT_SORT.saucepan;
+            resetFilters();
+            try { localStorage.setItem(SOURCE_KEY, 'saucepan'); } catch { /* storage unavailable */ }
+        }
+        if (sauceUser) return openCreator('', decodeURIComponent(sauceUser[1]), 'saucepan');
+        return sauce[1].toLowerCase() === 'lorebook' ? openSauceLorebook(sauce[2]) : openSauceDetail(sauce[2]);
+    }
 
     if (chub || janitorCharacter || janitorProfile) {
         $('#jai_search').value = state.search;
@@ -1849,8 +2299,8 @@ function submitSearch() {
         return loadList();
     }
     const searchSort = SEARCH_SORT[state.source];
-    if (text && !state.search) state.sort = searchSort;
-    if (!text && state.sort === searchSort) state.sort = DEFAULT_SORT[state.source];
+    if (searchSort && text && !state.search) state.sort = searchSort;
+    if (searchSort && !text && state.sort === searchSort) state.sort = DEFAULT_SORT[state.source];
     state.search = text;
     state.page = 1;
     loadList();
@@ -1890,9 +2340,10 @@ function openCreator(id, name, source = state.source) {
     resetFilters();
     state.kind = 'characters';
     state.creator = { id: source === 'chub' ? (name || id) : id, name: name || '', profile: null };
+    // Saucepan creators are found by handle when only the handle is known (e.g. from the Library).
+    if (source === 'saucepan' && !id && !name) state.creator = null;
     state.sort = CREATOR_SORT[source];
-    loadList();
-    loadCreator(state.creator.id);
+    loadList().then(() => state.creator && loadCreator(state.creator.id || state.creator.name));
 }
 
 function resume() {
@@ -1929,6 +2380,21 @@ function updateStatus() {
     if (state.source === 'chub') {
         $('#jai_status').className = 'jai_status jai_ok';
         $('#jai_status').textContent = chubAccount().key ? `Chub · connected${chubAccount().user ? ` as @${chubAccount().user}` : ''}` : 'Chub · no account needed';
+        return;
+    }
+    if (state.source === 'saucepan') {
+        const sauce = sauceAccount();
+        const status = $('#jai_status');
+        if (sauceProxyOk === false) {
+            status.className = 'jai_status jai_bad';
+            status.textContent = 'Saucepan · proxy switched off';
+        } else if (sauce.token) {
+            status.className = `jai_status ${sauce.verified ? 'jai_ok' : 'jai_bad'}`;
+            status.textContent = `Saucepan · connected${sauce.user ? ` as @${sauce.user}` : ''}${sauce.verified ? '' : ' · email not verified'}`;
+        } else {
+            status.className = 'jai_status';
+            status.textContent = 'Saucepan · not connected (browse only)';
+        }
         return;
     }
     if (isLocalView()) {
@@ -1984,6 +2450,10 @@ function showConnect(reason = '') {
         : (token && !expired
             ? `<span class="jai_ok"><i class="fa-solid fa-check"></i> connected · ${minutesLeft >= 120 ? `~${Math.round(minutesLeft / 60)} h` : `${Math.max(minutesLeft ?? 0, 1)} min`} left</span>`
             : `<span class="jai_bad">${expired ? 'login expired' : 'not connected'}</span>`);
+    const sauce = sauceAccount();
+    const sauceState = sauce.token
+        ? `<span class="${sauce.verified ? 'jai_ok' : 'jai_bad'}"><i class="fa-solid fa-check"></i> connected${sauce.user ? ` as @${esc(sauce.user)}` : ''}${sauce.verified ? '' : ' · email not verified'}</span>`
+        : '<span class="jai_bad">not connected</span>';
     const chubState = chub.key
         ? `<span class="jai_ok"><i class="fa-solid fa-check"></i> connected${chub.user ? ` as @${esc(chub.user)}` : ''}</span>`
         : '<span class="jai_bad">not connected</span>';
@@ -2009,14 +2479,20 @@ function showConnect(reason = '') {
                 ${steps('Chub', 'open-chub')}
                 ${chub.key ? '<span class="jai_link" data-jai="disconnect-chub">Disconnect Chub</span>' : ''}
             </div>
+            <div class="jai_acc">
+                <div class="jai_acc_head"><b>Saucepan</b> ${sauceState}</div>
+                <p class="jai_note">For search, definitions, lorebooks and your Saucepan favorites. Browsing works without it. Connect once; it stays connected.${sauce.token && !sauce.verified ? ' <b>Saucepan only sends definitions to accounts with a verified email</b> — verify yours on saucepan.ai.' : ''}${sauceProxyOk === false ? ' <b>Needs SillyTavern\'s proxy</b> — open the Saucepan tab for the one-time setup.' : ''}</p>
+                ${steps('Saucepan', 'open-sauce')}
+                ${sauce.token ? '<span class="jai_link" data-jai="disconnect-sauce">Disconnect Saucepan</span>' : ''}
+            </div>
         </div>
         <details class="jai_bm" ${settings().bookmarkSeen ? '' : 'open'}>
-            <summary><b>First time:</b> add the Bot Bazaar bookmark (one button for both sites)</summary>
+            <summary><b>First time:</b> add the Bot Bazaar bookmark (one button for every site)</summary>
             <ul>
                 <li><b>Computer:</b> press <b>Ctrl+Shift+B</b> to show the bookmarks bar, then drag this onto it: <a class="jai_bookmarklet" href="${esc(buildBookmarklet())}" title="Drag me to the bookmarks bar">Bot Bazaar</a></li>
-                <li><b>Phone:</b> ${button('copycode', 'fa-copy', 'Copy bookmark code')} then bookmark any page, edit that bookmark, paste the code as its address and name it <b>bazaar</b>. On JanitorAI or Chub, type <b>bazaar</b> in the address bar and tap the bookmark.</li>
+                <li><b>Phone:</b> ${button('copycode', 'fa-copy', 'Copy bookmark code')} then bookmark any page, edit that bookmark, paste the code as its address and name it <b>bazaar</b>. On JanitorAI, Chub or Saucepan, type <b>bazaar</b> in the address bar and tap the bookmark.</li>
             </ul>
-            <p class="jai_note">Added the "Janitor token" bookmark before? Replace it with this one — it now works on Chub too.</p>
+            <p class="jai_note">Added the bookmark before? Replace it with this one — it now works on Saucepan too.</p>
         </details>
         <details>
             <summary>It didn't connect by itself?</summary>
@@ -2034,7 +2510,7 @@ function showConnect(reason = '') {
             </ol>
         </details>
         ${actions(button('resume', 'fa-arrow-left', 'Back'))}
-        <p class="jai_note">Your logins are saved in SillyTavern and this browser, and sent only to janitorai.com and chub.ai — never share them.</p>`);
+        <p class="jai_note">Your logins are saved in SillyTavern and this browser, and sent only to janitorai.com, chub.ai and saucepan.ai — never share them.</p>`);
     $('#jai_message').querySelector('.jai_bm')?.addEventListener('toggle', () => {
         settings().bookmarkSeen = true;
         ctx().saveSettingsDebounced();
@@ -2133,7 +2609,11 @@ function showError(error) {
     hideViews();
     updateStatus();
 
-    if (error.code === 'no-tab') {
+    if (error.code === 'proxy') {
+        showSauceSetup();
+    } else if (error.code === 'auth' && state.source === 'saucepan') {
+        showConnect(sauceAccount().token ? 'Saucepan did not accept your saved login — press the bookmark on saucepan.ai again.' : error.message);
+    } else if (error.code === 'no-tab') {
         showMessage(`
             <h3>Open JanitorAI</h3>
             <p>The helper script is installed, but no JanitorAI tab answered. Open JanitorAI in another tab, sign in, and leave that tab open while you browse here.</p>
@@ -2165,19 +2645,25 @@ function renderControls() {
     root.classList.toggle('jai_theme_chub', state.source === 'chub');
     root.classList.toggle('jai_theme_fav', state.source === 'favorites');
     root.classList.toggle('jai_theme_lib', state.source === 'library');
+    root.classList.toggle('jai_theme_sauce', state.source === 'saucepan');
     updateStatus();
     root.querySelectorAll('#jai_sources .jai_tab').forEach(tab => tab.classList.toggle('jai_active', tab.dataset.source === state.source));
     const isChub = state.source === 'chub';
     const local = isLocalView();
     root.querySelector('.jai_navscroll').style.display = local ? 'none' : '';
-    $('#jai_kinds').style.display = isChub ? '' : 'none';
+    const isSauce = state.source === 'saucepan';
+    // Saucepan can't list one creator's lorebooks, so a creator page shows characters only.
+    $('#jai_kinds').style.display = isChub || (isSauce && !state.creator) ? '' : 'none';
+    const booksToggle = root.querySelector('[data-sauce-books]');
+    booksToggle.style.display = isSauce && state.kind === 'characters' ? '' : 'none';
+    booksToggle.classList.toggle('jai_active', state.sauceBooks);
     root.querySelectorAll('#jai_kinds .jai_tab').forEach(tab => tab.classList.toggle('jai_active', tab.dataset.kind === state.kind));
     $('#jai_sorts').innerHTML = (SORTS[state.source] || [])
         .filter(([sort]) => sort !== SEARCH_SORT[state.source] || state.search)
         .map(([sort, icon, label]) => `<div class="jai_tab ${sort === state.sort ? 'jai_active' : ''}" data-sort="${sort}"><i class="fa-solid ${icon}"></i><span>${label}</span></div>`)
         .join('');
     root.querySelectorAll('#jai_modes .jai_tab').forEach(tab => tab.classList.toggle('jai_active', tab.dataset.mode === state.mode));
-    $('#jai_tag').style.display = isChub || local ? 'none' : '';
+    $('#jai_tag').style.display = isChub || isSauce || local ? 'none' : '';
     $('#jai_tag').value = state.tag;
 
     const chip = (which, icon, label) => `<span class="jai_filter"><i class="fa-solid ${icon}"></i> ${esc(label)} <i class="fa-solid fa-xmark" data-clear="${which}" title="Remove this filter"></i></span>`;
@@ -2186,9 +2672,9 @@ function renderControls() {
     if (state.search) chips.push(chip('search', 'fa-magnifying-glass', state.search));
     if (state.tag) chips.push(chip('tag', 'fa-tag', $('#jai_tag').selectedOptions[0]?.textContent || 'tag'));
     if (state.customTag) chips.push(chip('customTag', 'fa-hashtag', state.customTag));
-    if (state.topic) chips.push(chip('topic', 'fa-tag', state.topic));
+    if (state.topic) chips.push(chip('topic', 'fa-tag', isSauce ? prettyTag(state.topic) : state.topic));
     $('#jai_filters').innerHTML = local ? '' : chips.join('');
-    $('#jai_search').placeholder = local ? 'Filter by name or creator…' : 'Search… or paste a JanitorAI / Chub link';
+    $('#jai_search').placeholder = local ? 'Filter by name or creator…' : (isSauce && !sauceAccount().token ? 'Paste a Saucepan link (text search needs your login)…' : 'Search… or paste a JanitorAI / Chub / Saucepan link');
 }
 
 async function loadTags() {
@@ -2230,6 +2716,9 @@ async function loadList() {
     renderControls();
     updateStatus();
     if (isLocalView()) {
+        // Drop any site list still loading, so its answer can't land here or keep the controls locked.
+        listRequest++;
+        state.loading = false;
         root.querySelector('.jai_footer').style.display = 'none';
         showMessage('');
         if (state.source === 'favorites') {
@@ -2243,7 +2732,7 @@ async function loadList() {
     showMessage('<i class="fa-solid fa-spinner fa-spin"></i> Loading…');
     $('#jai_grid').innerHTML = '';
     try {
-        const { items, total, size } = state.source === 'chub' ? await chubList() : await janitorList();
+        const { items, total, size } = await ({ chub: chubList, saucepan: sauceList }[state.source] || janitorList)();
         if (request !== listRequest) return;
         state.total = total;
         state.size = size;
@@ -2257,7 +2746,7 @@ async function loadList() {
             state.creator.name = items[0].creatorName;
             renderControls();
         }
-        $('#jai_grid').innerHTML = items.map(renderCard).join('');
+        $('#jai_grid').innerHTML = items.map(m => (m.source === 'saucepan' ? renderSauceCard(m) : renderCard(m))).join('');
         root.querySelector('.jai_body').scrollTop = 0;
         showMessage(items.length ? '' : 'Nothing found.');
         if (state.source === 'janitor') loadTags();
@@ -2304,7 +2793,22 @@ async function loadCreator(id) {
     const source = state.source;
     let info;
     try {
-        if (source === 'chub') {
+        if (source === 'saucepan') {
+            const found = await sauceFetch(`/api/v1/user?${UUID.test(id) ? 'id' : 'handle'}=${encodeURIComponent(id)}`);
+            const user = found?.user || {};
+            id = state.creator?.id || id;
+            info = {
+                name: user.handle || id,
+                avatar: sauceImage(user.avatar?.id),
+                verified: false,
+                followers: Number(found?.follower_count),
+                count: null,
+                since: null,
+                about: esc(str(user.description)).replace(/\n/g, '<br>'),
+                link: `${SAUCE}/u/${encodeURIComponent(user.handle || id)}`,
+                site: 'Saucepan',
+            };
+        } else if (source === 'chub') {
             const user = await chubGet(`${CHUB_API}/api/users/${encodeURIComponent(id)}`);
             info = {
                 name: user.username || user.name || id,
@@ -2369,6 +2873,7 @@ const STATUS_LABEL = {
     unreadable: ['jai_bad', 'fa-triangle-exclamation', 'Could not be read'],
     failed: ['jai_bad', 'fa-triangle-exclamation', 'Could not be checked'],
     code: ['jai_dim', 'fa-code', 'Code — not supported'],
+    unverified: ['jai_bad', 'fa-envelope', 'Needs a verified Saucepan email'],
 };
 
 /**
@@ -2528,7 +3033,8 @@ function wireComments(box, source, ref) {
     const pageSize = 20;
     let page = 1;
     let chubMap = null;
-    if (source === 'chub') sortSelect.style.display = 'none';
+    if (source !== 'janitor') sortSelect.style.display = 'none';
+    const sauceReplies = new Map();
 
     const load = async (reset) => {
         if (reset) {
@@ -2539,7 +3045,20 @@ function wireComments(box, source, ref) {
         try {
             let items;
             let hasMore = false;
-            if (source === 'chub') {
+            if (source.startsWith('saucepan')) {
+                const type = source === 'saucepan-lorebook' ? 'lorebook' : 'companion';
+                const result = await sauceFetch(`/api/v1/comments?entity_type=${type}&entity_id=${encodeURIComponent(ref)}&limit=${pageSize}&offset=${(page - 1) * pageSize}`);
+                const raw = Array.isArray(result?.comments) ? result.comments : [];
+                raw.forEach(c => sauceReplies.set(c.id, Array.isArray(c.replies) ? c.replies : []));
+                items = raw.map(sauceComment);
+                hasMore = raw.length === pageSize;
+                const total = Number(result?.count || 0) + Number(result?.reply_count || 0);
+                panel.querySelector('.jai_comment_count').textContent = total ? `(${total})` : '';
+                if (result?.is_disabled) {
+                    list.innerHTML = '<div class="jai_dim">The creator turned comments off.</div>';
+                    return;
+                }
+            } else if (source === 'chub') {
                 const result = await chubGet(`${CHUB_API}/api/project/${encodeURIComponent(ref)}/ratings`);
                 chubMap = result?.ratings_map || {};
                 const all = Object.values(chubMap);
@@ -2559,7 +3078,7 @@ function wireComments(box, source, ref) {
             more.style.display = hasMore ? '' : 'none';
         } catch (error) {
             console.warn(TAG, 'Comments failed', error);
-            if (reset) list.innerHTML = `<div class="jai_bad">${esc(error.code === 'auth' ? 'Connect your JanitorAI account to read comments.' : (error.message || 'Comments could not be loaded.'))}</div>`;
+            if (reset) list.innerHTML = `<div class="jai_bad">${esc(error.code === 'auth' ? `Connect your ${source.startsWith('saucepan') ? 'Saucepan' : 'JanitorAI'} account to read comments.` : (error.message || 'Comments could not be loaded.'))}</div>`;
         }
     };
 
@@ -2579,7 +3098,9 @@ function wireComments(box, source, ref) {
         replies.innerHTML = '<div class="jai_dim"><i class="fa-solid fa-spinner fa-spin"></i></div>';
         try {
             let items;
-            if (source === 'chub') {
+            if (source.startsWith('saucepan')) {
+                items = (sauceReplies.get(comment.dataset.cid) || []).map(sauceComment);
+            } else if (source === 'chub') {
                 const parent = chubMap?.[comment.dataset.cid];
                 items = (parent?.children || []).map(id => chubMap[id]).filter(Boolean).map(chubComment);
             } else {
@@ -2955,6 +3476,322 @@ async function openChubDetail(fullPath) {
     });
 }
 
+// ---------------------------------------------------------------------------------------------- Saucepan pages
+
+const sauceChips = (tags) => (Array.isArray(tags) ? tags : [])
+    .map(tag => `<span class="jai_chip" data-topic="${esc(tag)}" title="Show more with this tag">${esc(prettyTag(tag))}</span>`).join('');
+
+const sauceBlurb = (text) => esc(str(text).trim()).replace(/\n{2,}/g, '<br><br>').replace(/\n/g, '<br>');
+
+/** Saucepan card: tall portrait with the name over it, description and tags below. */
+function renderSauceCard(m) {
+    const isBook = m.kind === 'lorebook';
+    const stats = isBook
+        ? `<span title="Favorites"><i class="fa-solid fa-heart"></i> ${compact(m.favs)}</span>${m.chapters ? `<span title="Entries"><i class="fa-solid fa-list"></i> ${compact(m.chapters)}</span>` : ''}${m.words ? `<span title="Words"><i class="fa-solid fa-font"></i> ${compact(m.words)}</span>` : ''}`
+        : `<span title="Favorites"><i class="fa-solid fa-heart"></i> ${compact(m.favs)}</span><span title="Chats"><i class="fa-regular fa-message"></i> ${compact(m.chats)}</span>${m.books ? `<span title="${m.books} lorebook${m.books > 1 ? 's' : ''}"><i class="fa-solid fa-book-atlas"></i> ${m.books}</span>` : ''}`;
+    return `
+        <div class="jai_card jai_scard" data-id="${esc(m.id)}" data-source="saucepan" data-kind="${m.kind}">
+            <div class="jai_sthumb">
+                ${m.image ? `<img loading="lazy" referrerpolicy="no-referrer" src="${esc(m.image)}" alt="">` : '<div class="jai_poster_blank"><i class="fa-solid fa-user"></i></div>'}
+                ${favButton({ ...m, creator: m.creatorName })}
+                ${isBook ? '<span class="jai_sbadge"><i class="fa-solid fa-book-atlas"></i> Lorebook</span>' : ''}
+                <div class="jai_sname">
+                    <b title="${esc(m.name)}">${esc(m.name)}</b>
+                    <span class="jai_creator_link" data-creator="${esc(m.creatorId)}" data-name="${esc(m.creatorName)}" data-source="saucepan" title="Show everything by this creator">@${esc(m.creatorName)}</span>
+                </div>
+            </div>
+            <div class="jai_sbody">
+                <div class="jai_sstats">${stats}</div>
+                <div class="jai_blurb">${sauceBlurb(m.blurb)}</div>
+                <div class="jai_tags">${sauceChips(m.tags)}</div>
+                <div class="jai_card_foot">
+                    ${isBook ? '' : `<span>${compact(m.tokens)} tokens</span>`}
+                    ${m.updated ? `<span title="Last updated ${esc(fullDate(m.updated))}"><i class="fa-regular fa-clock"></i> ${esc(timeAgo(m.updated))}</span>` : ''}
+                </div>
+            </div>
+        </div>`;
+}
+
+/** Shown when SillyTavern's proxy is off: the one-time setup Saucepan needs. */
+function showSauceSetup() {
+    hideViews();
+    showMessage(`
+        <h3><i class="fa-solid fa-plug"></i> One-time setup for Saucepan</h3>
+        <p>Saucepan only answers its own website, so Bot Bazaar talks to it through SillyTavern's built-in proxy. That proxy is switched off right now.</p>
+        <ol class="jai_steps">
+            <li>Open <b>config.yaml</b> in your SillyTavern folder (the same folder as <i>Start.bat</i> / <i>start.sh</i>).</li>
+            <li>Find <code>enableCorsProxy: false</code> and change it to <code>enableCorsProxy: true</code>, then save.</li>
+            <li>Restart SillyTavern and reload this page.</li>
+        </ol>
+        <p class="jai_note">Only needed once, and it then works on every device that uses this SillyTavern, phones included. JanitorAI, Chub, Favorites and the Library work without it.</p>
+        ${actions(button('retry', 'fa-rotate', 'Try again'), `<div class="jai_btn" data-source-switch="chub"><i class="fa-solid fa-arrow-left"></i><span>Browse Chub instead</span></div>`)}`);
+    $('#jai_message').querySelector('[data-source-switch]')?.addEventListener('click', () => switchSource('chub'));
+}
+
+function sauceStatusFact(result, open) {
+    switch (result?.status) {
+        case 'ok': return sauceHasDefinition(result.def) ? ['jai_ok', 'fa-check', 'Definition available'] : ['jai_bad', 'fa-lock', 'Saucepan sent no definition'];
+        case 'login': return ['jai_bad', 'fa-key', 'Definition needs your Saucepan login'];
+        case 'unverified': return ['jai_bad', 'fa-envelope', 'Verify your email on Saucepan to get definitions'];
+        case 'hidden': return ['jai_bad', 'fa-lock', open === false ? 'Definition hidden by the creator' : 'Saucepan did not send the definition'];
+        case 'failed': return ['jai_bad', 'fa-triangle-exclamation', `Definition could not be loaded: ${result.message || ''}`];
+        default: return ['jai_dim', 'fa-spinner fa-spin', 'Checking the definition…'];
+    }
+}
+
+/** Character page for Saucepan. */
+async function openSauceDetail(id) {
+    const seen = sauceSeen.get(id);
+    if (seen?.kind === 'lorebook') return openSauceLorebook(id);
+    setView('detail');
+    renderControls();
+    state.detail = id;
+    state.detailSource = 'saucepan';
+    const box = $('#jai_detail');
+    box.innerHTML = '';
+    box.style.removeProperty('--jai-backdrop');
+    showMessage('<i class="fa-solid fa-spinner fa-spin"></i> Loading character…');
+
+    let c;
+    try {
+        const result = await sauceFetch(`/api/v2/companions/${encodeURIComponent(id)}`);
+        c = result?.companion;
+        if (!c) throw new ApiError('http', 'Saucepan did not return this character.');
+    } catch (error) {
+        // A favorite saved as a character may really be a lorebook.
+        if (error.status === 404 && !seen) return openSauceLorebook(id);
+        return showError(error);
+    }
+    if (state.detail !== id) return;
+    showMessage('');
+
+    const m = sauceModel(c);
+    const connected = !!sauceAccount().token;
+    const posted = sauceDate(c.posted_at);
+    const updated = sauceDate(c.updated_at);
+    const tokenParts = [
+        ['Card', c.card_token_count],
+        ['Examples', c.example_dialogue_token_count],
+        ['Advanced prompt', c.advanced_prompt_token_count],
+        ['Formatting', c.formatting_instructions_token_count],
+    ].filter(([, n]) => Number(n) > 0);
+    const tokens = tokenParts.reduce((sum, [, n]) => sum + Number(n), 0);
+    const [factCls, factIcon, factText] = sauceStatusFact(connected ? null : { status: 'login' }, c.open_definition);
+    const bigImage = sauceImage(c.image?.id, 'public');
+    if (bigImage) box.style.setProperty('--jai-backdrop', `url("${bigImage}")`);
+
+    box.innerHTML = `
+        <div class="jai_sdetail">
+            <div class="jai_sportrait">
+                ${bigImage ? `<img referrerpolicy="no-referrer" src="${esc(bigImage)}" alt="">` : ''}
+                <span class="jai_sheart" title="Favorites"><i class="fa-solid fa-heart"></i> ${compact(c.favorite_count)}</span>
+                ${m.portraits ? `<span class="jai_sgallery" title="Portraits on Saucepan"><i class="fa-regular fa-images"></i> ${m.portraits}</span>` : ''}
+            </div>
+            <div class="jai_shead">
+                <h2 class="jai_detail_title">${esc(m.name)}</h2>
+                <div class="jai_sby">by <span class="jai_creator_link" data-creator="${esc(c.author_id)}" data-name="${esc(c.author_handle)}" data-source="saucepan" title="Show everything by this creator">@${esc(c.author_handle)}</span>${c.sus ? ' <span class="jai_sspicy" title="Spicy">🌶</span>' : ''}</div>
+                <div class="jai_sdesc">${sauceBlurb(c.short_description) || '<i>No description.</i>'}</div>
+                <div class="jai_tags">${sauceChips(c.tags)}${(Array.isArray(c.fandom_tags) ? c.fandom_tags : []).map(f => `<span class="jai_chip jai_hash" title="Fandom">${esc(f.display_name || f.id || f)}</span>`).join('')}</div>
+                <div class="jai_dates">
+                    ${posted ? `<span><i class="fa-regular fa-calendar-plus"></i> Posted ${esc(fullDate(posted))}</span>` : ''}
+                    ${updated ? `<span><i class="fa-regular fa-clock"></i> Updated ${esc(fullDate(updated))} (${esc(timeAgo(updated))})</span>` : ''}
+                </div>
+                <div class="jai_sstats jai_sstats_big">
+                    <span title="Chats"><i class="fa-regular fa-message"></i> ${compact(c.chat_count)} chats</span>
+                    <span title="Messages"><i class="fa-regular fa-comments"></i> ${compact(c.interaction_count)} messages</span>
+                    ${tokens ? `<span title="${esc(tokenParts.map(([l, n]) => `${l} ${compact(n)}`).join(' · '))}"><i class="fa-solid fa-coins"></i> ${compact(tokens)} tokens</span>` : ''}
+                    ${Number(c.scenario_count) > 1 ? `<span><i class="fa-regular fa-hand"></i> ${c.scenario_count} scenarios</span>` : ''}
+                    ${m.books ? `<span><i class="fa-solid fa-book-atlas"></i> ${m.books} lorebook${m.books > 1 ? 's' : ''}</span>` : ''}
+                </div>
+                <div class="jai_jactions">
+                    <div class="jai_btn jai_primary jai_import"><i class="fa-solid fa-file-import"></i><span>Import to SillyTavern</span></div>
+                    ${favAction({ source: 'saucepan', id: c.id, name: m.name, image: m.image, creator: c.author_handle, creatorId: c.author_id, kind: 'character' })}
+                    ${m.books ? '<div class="jai_btn jai_book_only" title="Save only the lorebooks as a World Info file"><i class="fa-solid fa-book-atlas"></i><span>Lorebook only</span></div>' : ''}
+                    <a class="jai_btn" href="${esc(saucePage(c.id))}" target="_blank" rel="noopener" title="View on Saucepan"><i class="fa-solid fa-up-right-from-square"></i><span>Saucepan</span></a>
+                    <div class="jai_btn jai_raw" title="Copy the raw data Saucepan sent (useful for bug reports)"><i class="fa-solid fa-copy"></i></div>
+                    <div class="jai_btn jai_back" title="Back to the list"><i class="fa-solid fa-arrow-left"></i><span>Back</span></div>
+                </div>
+                <div class="jai_facts">
+                    <span class="jai_deffact ${factCls}"><i class="fa-solid ${factIcon}"></i> ${esc(factText)}</span>
+                    <span class="jai_bookfact ${m.books ? '' : 'jai_dim'}"><i class="fa-solid fa-book-atlas"></i> ${m.books ? (connected ? '<i class="fa-solid fa-spinner fa-spin"></i> Checking lorebooks…' : 'Lorebooks need your Saucepan login') : 'No lorebook attached'}</span>
+                    ${c.open_definition ? '<span class="jai_ok" title="The creator shares the definition"><i class="fa-solid fa-lock-open"></i> Open definition</span>' : ''}
+                    ${connected ? '' : '<span class="jai_link" data-jai-connect><i class="fa-solid fa-key"></i> Connect Saucepan</span>'}
+                </div>
+            </div>
+        </div>
+        <div class="jai_books"></div>
+        <div class="jai_sdefs"></div>
+        ${commentsPanel(saucePage(c.id), 'Saucepan')}`;
+
+    box.querySelector('[data-jai-connect]')?.addEventListener('click', () => showConnect());
+    box.querySelector('.jai_back').addEventListener('click', () => ($('#jai_grid').children.length ? (setView('grid'), showMessage('')) : loadList()));
+    box.querySelector('.jai_raw').addEventListener('click', () => copyText(JSON.stringify(c, null, 2), 'Raw data copied to the clipboard.'));
+    wireComments(box, 'saucepan', c.id);
+
+    // With a login: the definition and the attached lorebooks, checked before promising anything.
+    let defResult = connected ? null : { status: 'login' };
+    let attached = null;
+    const defReady = connected ? fetchSauceDefinition(c.id).then((result) => {
+        defResult = result;
+        if (state.detail !== id) return;
+        const [cls, icon, text] = sauceStatusFact(result, c.open_definition);
+        const fact = box.querySelector('.jai_deffact');
+        fact.className = `jai_deffact ${cls}`;
+        fact.innerHTML = `<i class="fa-solid ${icon}"></i> ${esc(text)}`;
+        if (result.status === 'ok') {
+            const def = result.def;
+            const greetings = sauceGreetings(def);
+            box.querySelector('.jai_sdefs').innerHTML = definitionPanel([
+                ['Card', sauceText(def.card)],
+                ...greetings.map((g, i) => [i ? `Scenario ${i + 1}` : 'First message', g]),
+                ['Example dialogue', sauceText(def.example_dialogue)],
+                ['Advanced prompt', sauceText(def.advanced_prompt)],
+                ['Formatting instructions', sauceText(def.formatting_instructions)],
+            ]);
+        }
+    }).catch(error => showError(error)) : Promise.resolve();
+
+    if (connected && m.books) {
+        (async () => {
+            try {
+                attached = await sauceAttachedBooks(c.id);
+            } catch (error) {
+                const fact = box.querySelector('.jai_bookfact');
+                if (fact) { fact.className = 'jai_bookfact jai_bad'; fact.innerHTML = `<i class="fa-solid fa-book-atlas"></i> ${esc(error.message)}`; }
+                return;
+            }
+            const show = (results) => {
+                const panel = box.querySelector('.jai_books');
+                if (panel) {
+                    panel.innerHTML = booksPanel(attached.map(b => ({
+                        name: str(b.name),
+                        kind: b.definition_protection === 'open' ? 'Open lorebook' : 'Lorebook',
+                        status: results ? (results.get(b.id)?.status || 'failed') : 'checking',
+                        entries: results?.get(b.id)?.entries?.length,
+                        meta: [b.owner_handle ? `@${b.owner_handle}` : '', b.total_word_count ? `${compact(b.total_word_count)} words` : '', b.chapter_count ? `${b.chapter_count} entries` : ''].filter(Boolean).join(' · '),
+                        about: str(b.short_description).length > 220 ? `${str(b.short_description).slice(0, 220).trim()}…` : str(b.short_description),
+                    })));
+                }
+            };
+            show(null);
+            const results = new Map();
+            for (const b of attached) {
+                results.set(b.id, await fetchSauceLorebook(b.id));
+                if (state.detail !== id) return;
+            }
+            show(results);
+            const ok = [...results.values()].filter(r => r.status === 'ok');
+            const total = ok.reduce((n, r) => n + r.entries.length, 0);
+            const fact = box.querySelector('.jai_bookfact');
+            if (!fact) return;
+            const closed = attached.length - ok.length;
+            const fallback = sauceAccount().verified ? 'Saucepan did not send the lorebook contents' : 'Lorebooks need a verified Saucepan email';
+            let text = ok.length ? `${ok.length} lorebook${ok.length > 1 ? 's' : ''} (${total} entries) will be imported` : fallback;
+            if (ok.length && closed) text += ` · ${closed} not readable`;
+            fact.className = `jai_bookfact ${ok.length ? 'jai_ok' : 'jai_bad'}`;
+            fact.innerHTML = `<i class="fa-solid fa-book-atlas"></i> ${esc(text)}`;
+            if (!ok.length) box.querySelector('.jai_book_only')?.remove();
+        })();
+    }
+
+    const run = (el, label, task) => el?.addEventListener('click', async () => {
+        if (el.classList.contains('jai_disabled')) return;
+        el.classList.add('jai_disabled');
+        el.querySelector('span').textContent = 'Importing…';
+        try {
+            await task();
+        } catch (error) {
+            console.error(TAG, 'Saucepan import failed', error);
+            if (error.code === 'proxy') showSauceSetup();
+            else toastr.error(String(error?.message || error), 'Bot Bazaar: import failed');
+        } finally {
+            el.classList.remove('jai_disabled');
+            el.querySelector('span').textContent = label;
+        }
+    });
+    run(box.querySelector('.jai_import'), 'Import to SillyTavern', async () => {
+        await defReady;
+        if (await importSauceCharacter(c, defResult)) closeBrowser();
+    });
+    run(box.querySelector('.jai_book_only'), 'Lorebook only', async () => {
+        const name = safeName(m.name) || 'Saucepan character';
+        const { book, warnings } = await sauceBook(c.id, `${name} (Saucepan Lorebook)`, attached);
+        warnings.forEach(w => toastr.warning(w, 'Bot Bazaar', { timeOut: 12000 }));
+        if (!book) return toastr.info('No lorebook entries could be imported.', 'Bot Bazaar');
+        const { saveWorldInfo, convertCharacterBook, updateWorldInfoList } = ctx();
+        await saveWorldInfo(book.name, convertCharacterBook(structuredClone(book)), true);
+        await updateWorldInfoList();
+        toastr.success(`"${book.name}" saved with ${book.entries.length} entries. To attach it, open a character and pick it with the globe button.`, 'Bot Bazaar', { timeOut: 12000 });
+    });
+}
+
+/** Lorebook page for Saucepan (contents need the login). */
+async function openSauceLorebook(id) {
+    setView('detail');
+    renderControls();
+    state.detail = id;
+    state.detailSource = 'saucepan';
+    const box = $('#jai_detail');
+    box.style.removeProperty('--jai-backdrop');
+    const fav = favorites?.find(f => f.key === favKey('saucepan', id));
+    const m = sauceSeen.get(id) || { id, kind: 'lorebook', name: fav?.name || 'Lorebook', image: fav?.image || '', creatorName: fav?.creator || '', creatorId: fav?.creatorId || '', blurb: '', tags: [] };
+    const connected = !!sauceAccount().token;
+    showMessage('');
+    box.innerHTML = `
+        <div class="jai_sdetail">
+            <div class="jai_sportrait">
+                ${m.image ? `<img referrerpolicy="no-referrer" src="${esc(m.image.replace(/\/thumbnail$/, '/public'))}" alt="">` : ''}
+                ${m.favs !== undefined ? `<span class="jai_sheart"><i class="fa-solid fa-heart"></i> ${compact(m.favs)}</span>` : ''}
+            </div>
+            <div class="jai_shead">
+                <h2 class="jai_detail_title"><i class="fa-solid fa-book-atlas"></i> ${esc(m.name)}</h2>
+                ${m.creatorName ? `<div class="jai_sby">by <span class="jai_creator_link" data-creator="${esc(m.creatorId)}" data-name="${esc(m.creatorName)}" data-source="saucepan">@${esc(m.creatorName)}</span></div>` : ''}
+                <div class="jai_sdesc">${sauceBlurb(m.blurb)}</div>
+                <div class="jai_tags">${sauceChips(m.tags)}</div>
+                <div class="jai_sstats jai_sstats_big">
+                    ${m.chapters ? `<span><i class="fa-solid fa-list"></i> ${compact(m.chapters)} entries</span>` : ''}
+                    ${m.words ? `<span><i class="fa-solid fa-font"></i> ${compact(m.words)} words</span>` : ''}
+                    ${m.uses ? `<span><i class="fa-solid fa-user"></i> used by ${compact(m.uses)} characters</span>` : ''}
+                </div>
+                <div class="jai_jactions">
+                    <div class="jai_btn jai_primary jai_import"><i class="fa-solid fa-book-atlas"></i><span>Import lorebook</span></div>
+                    ${favAction({ source: 'saucepan', id, name: m.name, image: m.image, creator: m.creatorName, creatorId: m.creatorId, kind: 'lorebook' })}
+                    <a class="jai_btn" href="${esc(saucePage(id, 'lorebook'))}" target="_blank" rel="noopener"><i class="fa-solid fa-up-right-from-square"></i><span>Saucepan</span></a>
+                    <div class="jai_btn jai_back"><i class="fa-solid fa-arrow-left"></i><span>Back</span></div>
+                </div>
+                <div class="jai_facts">
+                    <span class="jai_bookfact ${connected ? 'jai_dim' : 'jai_bad'}"><i class="fa-solid ${connected ? 'fa-spinner fa-spin' : 'fa-key'}"></i> ${connected ? 'Checking the contents…' : 'The contents need your Saucepan login'}</span>
+                    ${connected ? '' : '<span class="jai_link" data-jai-connect><i class="fa-solid fa-key"></i> Connect Saucepan</span>'}
+                </div>
+            </div>
+        </div>
+        ${commentsPanel(saucePage(id, 'lorebook'), 'Saucepan')}`;
+    box.querySelector('[data-jai-connect]')?.addEventListener('click', () => showConnect());
+    box.querySelector('.jai_back').addEventListener('click', () => ($('#jai_grid').children.length ? (setView('grid'), showMessage('')) : loadList()));
+    wireComments(box, 'saucepan-lorebook', id);
+
+    let result = null;
+    if (connected) {
+        result = await fetchSauceLorebook(id).catch(error => ({ status: 'failed', message: error.message }));
+        if (state.detail !== id) return;
+        const fact = box.querySelector('.jai_bookfact');
+        fact.className = `jai_bookfact ${result.status === 'ok' ? 'jai_ok' : 'jai_bad'}`;
+        fact.innerHTML = result.status === 'ok'
+            ? `<i class="fa-solid fa-check"></i> ${result.entries.length} entries will be imported`
+            : `<i class="fa-solid fa-lock"></i> ${esc(sauceAccount().verified ? 'Saucepan did not send the contents (kept private by the creator)' : 'Verify your email on Saucepan to read lorebooks')}`;
+    }
+    const importButton = box.querySelector('.jai_import');
+    importButton.addEventListener('click', async () => {
+        if (result?.status !== 'ok') return toastr.warning(connected ? 'Saucepan did not send this lorebook\'s contents.' : 'Connect your Saucepan account first.', 'Bot Bazaar');
+        const name = safeName(m.name) || 'Saucepan lorebook';
+        const book = { name, description: `Imported from Saucepan (${id})`, extensions: {}, entries: result.entries.map((e, i) => convertEntry(e, i)) };
+        const { saveWorldInfo, convertCharacterBook, updateWorldInfoList } = ctx();
+        await saveWorldInfo(name, convertCharacterBook(structuredClone(book)), true);
+        await updateWorldInfoList();
+        toastr.success(`"${name}" saved with ${book.entries.length} entries. To attach it, open a character and pick it with the globe button.`, 'Bot Bazaar', { timeOut: 12000 });
+    });
+}
+
 async function openBrowser() {
     if (!root) buildUi();
     await Promise.all([loadFavorites(), loadSessionFile()]);
@@ -2981,9 +3818,14 @@ function closeBrowser() {
 async function botBazaarBookmark(ST) {
     const CHUB = /(^|\.)(chub\.ai|characterhub\.org)$/.test(location.hostname);
     const JANITOR = /(^|\.)janitorai\.com$/.test(location.hostname);
-    if (!CHUB && !JANITOR) { alert('Open janitorai.com or chub.ai (signed in) first, then press this.'); return; }
+    const SAUCEPAN = /(^|\.)saucepan\.ai$/.test(location.hostname);
+    if (!CHUB && !JANITOR && !SAUCEPAN) { alert('Open janitorai.com, chub.ai or saucepan.ai (signed in) first, then press this.'); return; }
     let payload;
-    if (CHUB) {
+    if (SAUCEPAN) {
+        const key = localStorage.getItem('hallucination/auth_token') || '';
+        if (!key) { alert('No Saucepan login found here. Sign in to saucepan.ai first.'); return; }
+        payload = { v: 1, saucepan: key };
+    } else if (CHUB) {
         let key = localStorage.getItem('URQL_TOKEN') || '';
         try { const parsed = JSON.parse(key); if (typeof parsed === 'string') key = parsed; } catch (e) { /* already plain */ }
         if (!key) { alert('No Chub login found here. Sign in to chub.ai first.'); return; }
@@ -3055,6 +3897,28 @@ async function importLogin(payload, { open = false } = {}) {
             toastr.error('Chub did not accept that login. Sign in on chub.ai and press the bookmark again.', 'Bot Bazaar');
         }
     }
+    if (typeof payload.saucepan === 'string' && payload.saucepan) {
+        try {
+            const user = await verifySauceToken(payload.saucepan);
+            if (user) {
+                storeSauceToken(payload.saucepan, user);
+                syncState.saucepan.at = 0;
+                connected.push('Saucepan');
+                if (user.is_verified === false) toastr.warning('Your Saucepan email is not verified yet. Saucepan only sends definitions and lorebooks to verified accounts — verify it on saucepan.ai.', 'Bot Bazaar', { timeOut: 15000 });
+            } else {
+                toastr.error('Saucepan did not accept that login. Sign in on saucepan.ai and press the bookmark again.', 'Bot Bazaar');
+            }
+        } catch (error) {
+            if (error.code === 'proxy') {
+                // Keep it: it will work as soon as the proxy is switched on.
+                storeSauceToken(payload.saucepan);
+                connected.push('Saucepan');
+                toastr.warning('Saucepan login saved, but SillyTavern\'s proxy is off. Open the Saucepan tab in Bot Bazaar for the one-time setup.', 'Bot Bazaar', { timeOut: 15000 });
+            } else {
+                toastr.error(`Saucepan login could not be checked: ${error.message}`, 'Bot Bazaar');
+            }
+        }
+    }
     if (connected.length) {
         toastr.success(`${connected.join(' and ')} connected.`, 'Bot Bazaar');
         if (open && !root?.classList.contains('jai_open')) openBrowser();
@@ -3078,7 +3942,7 @@ function addButtons() {
         const button = document.createElement('div');
         button.id = 'jai_open_button';
         button.className = 'menu_button fa-solid fa-store';
-        button.title = 'Bot Bazaar: browse & import characters from JanitorAI and Chub';
+        button.title = 'Bot Bazaar: browse & import characters from JanitorAI, Chub and Saucepan';
         button.addEventListener('click', openBrowser);
         external.insertAdjacentElement('afterend', button);
     }
