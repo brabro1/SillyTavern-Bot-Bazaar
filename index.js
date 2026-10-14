@@ -752,6 +752,28 @@ const relatedLorebooks = (node) => [...new Set([
     ...(Array.isArray(node.definition?.extensions?.chub?.related_lorebooks) ? node.definition.extensions.chub.related_lorebooks : []),
 ])].filter(id => Number(id) > 0);
 
+const linkedCache = new Map();
+
+/**
+ * Downloads one linked Chub lorebook by its project id.
+ * @returns {Promise<{status: 'ok'|'missing'|'failed', entries?: object[]}>}
+ */
+async function fetchLinkedLorebook(id) {
+    if (linkedCache.has(id)) return linkedCache.get(id);
+    let result;
+    try {
+        const world = await chubGet(chubRawLorebookUrl(id));
+        const entries = (Array.isArray(world?.entries) ? world.entries : Object.values(world?.entries || {})).filter(e => e && typeof e === 'object');
+        result = entries.length ? { status: 'ok', entries } : { status: 'missing' };
+    } catch (error) {
+        console.warn(TAG, 'Linked Chub lorebook failed', id, error);
+        // Chub answers 404 "Project not found" for deleted or private lorebooks.
+        result = { status: error.status === 404 ? 'missing' : 'failed' };
+    }
+    linkedCache.set(id, result);
+    return result;
+}
+
 /** Embedded lorebook + every linked lorebook of a Chub character, merged into one V2 character_book. */
 async function chubBook(node, bookName) {
     const warnings = [];
@@ -759,16 +781,18 @@ async function chubBook(node, bookName) {
     const embedded = node.definition?.embedded_lorebook;
     if (Array.isArray(embedded?.entries)) embedded.entries.forEach(entry => entries.push(convertEntry(entry, entries.length)));
 
+    let missing = 0;
+    let failed = 0;
     for (const id of relatedLorebooks(node)) {
-        try {
-            const world = await chubGet(chubRawLorebookUrl(id));
-            const list = Array.isArray(world?.entries) ? world.entries : Object.values(world?.entries || {});
-            list.filter(e => e && typeof e === 'object').forEach(entry => entries.push(convertEntry(entry, entries.length)));
-        } catch (error) {
-            console.warn(TAG, 'Linked Chub lorebook failed', id, error);
-            warnings.push(`A linked lorebook (#${id}) could not be downloaded from Chub.`);
-        }
+        const linked = await fetchLinkedLorebook(id);
+        if (linked.status === 'ok') linked.entries.forEach(entry => entries.push(convertEntry(entry, entries.length)));
+        else if (linked.status === 'missing') missing++;
+        else failed++;
     }
+    if (missing) {
+        warnings.push(`${missing === 1 ? 'A linked lorebook is' : `${missing} linked lorebooks are`} no longer on Chub — deleted or made private by ${missing === 1 ? 'its' : 'their'} creator — so ${missing === 1 ? 'it' : 'they'} can't be imported.`);
+    }
+    if (failed) warnings.push(`${failed === 1 ? 'A linked lorebook' : `${failed} linked lorebooks`} could not be downloaded from Chub right now. Try again later.`);
 
     if (!entries.length) return { book: null, warnings };
     return { book: { name: bookName, description: `Imported from Chub (${node.fullPath})`, extensions: {}, entries }, warnings };
@@ -1788,7 +1812,7 @@ async function openChubDetail(fullPath) {
                 ${isLorebook
         ? `<span class="${embeddedCount ? 'jai_ok' : ''}"><i class="fa-solid fa-book-atlas"></i> ${embeddedCount ? `${embeddedCount} entries` : 'Lorebook'}</span>`
         : `<span class="jai_ok"><i class="fa-solid fa-check"></i> Definition available</span>
-                <span class="${bookParts.length ? 'jai_ok' : ''}"><i class="fa-solid fa-book-atlas"></i> ${bookParts.length ? `Lorebook: ${esc(bookParts.join(' + '))}` : 'No lorebook attached'}</span>`}
+                <span class="jai_bookfact ${embeddedCount ? 'jai_ok' : ''}"><i class="fa-solid fa-book-atlas"></i> ${related.length ? '<i class="fa-solid fa-spinner fa-spin"></i> Checking linked lorebooks…' : (bookParts.length ? `Lorebook: ${esc(bookParts.join(' + '))}` : 'No lorebook attached')}</span>`}
             </div>
             <div class="jai_tags">${topicChips(node.topics)}</div>
             <div class="jai_description jai_rich">${description ? richHtml(markdownToHtml(description)) : '<i>No description.</i>'}</div>
@@ -1816,6 +1840,31 @@ async function openChubDetail(fullPath) {
         if (isLorebook) return importChubLorebook(node);
         if (await importChubCharacter(node)) closeBrowser();
     });
+    // Linked lorebooks can disappear from Chub while characters still point to them; check before promising anything.
+    if (!isLorebook && related.length) {
+        (async () => {
+            const results = [];
+            for (const id of related) {
+                results.push(await fetchLinkedLorebook(id));
+                if (state.detail !== fullPath) return;
+            }
+            const usable = results.filter(r => r.status === 'ok');
+            const gone = results.filter(r => r.status === 'missing').length;
+            const failed = results.length - usable.length - gone;
+            const parts = [];
+            if (embeddedCount) parts.push(`${embeddedCount} entries in the card`);
+            if (usable.length) parts.push(`${usable.length} linked lorebook${usable.length > 1 ? 's' : ''} (${usable.reduce((n, r) => n + r.entries.length, 0)} entries)`);
+            let text = parts.length ? `Lorebook: ${parts.join(' + ')}` : 'No lorebook available';
+            if (gone) text += ` · ${gone} linked lorebook${gone > 1 ? 's' : ''} deleted or private on Chub`;
+            if (failed) text += ` · ${failed} could not be checked`;
+            const fact = box.querySelector('.jai_bookfact');
+            if (!fact) return;
+            fact.className = `jai_bookfact ${parts.length ? 'jai_ok' : 'jai_bad'}`;
+            fact.innerHTML = `<i class="fa-solid fa-book-atlas"></i> ${esc(text)}`;
+            if (!parts.length && !failed) box.querySelector('.jai_book_only')?.remove();
+        })();
+    }
+
     run(box.querySelector('.jai_book_only'), 'Lorebook only', async () => {
         const name = safeName(def.name || node.name) || 'Chub character';
         const { book, warnings } = await chubBook(node, `${name} (Chub Lorebook)`);
