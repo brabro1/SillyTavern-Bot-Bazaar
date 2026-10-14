@@ -515,6 +515,20 @@ async function importCharacter(detail) {
     return true;
 }
 
+/** Imports just the shared lorebook(s) of a character as a World Info file, e.g. for a card obtained elsewhere. */
+async function importLorebookOnly(detail) {
+    const { saveWorldInfo, convertCharacterBook, updateWorldInfoList } = ctx();
+    const name = safeName(detail.chat_name) || safeName(detail.name) || 'Janitor character';
+    const bookName = `${name} (Janitor Lorebook)`;
+    const { book, warnings } = await buildLorebook(detail, bookName);
+    warnings.forEach(w => toastr.warning(w, 'Janitor Importer', { timeOut: 10000 }));
+    if (!book) return;
+
+    await saveWorldInfo(bookName, convertCharacterBook(structuredClone(book)), true);
+    await updateWorldInfoList();
+    toastr.success(`"${bookName}" saved with ${book.entries.length} entries. To attach it, open a character and pick it with the globe button.`, 'Janitor Importer', { timeOut: 12000 });
+}
+
 // ---------------------------------------------------------------------------------------------- UI
 
 const state = { page: 1, sort: 'popular', mode: 'all', search: '', tag: '', total: 0, size: 0, loading: false, tagsLoaded: false, detail: null };
@@ -902,6 +916,7 @@ async function openDetail(id) {
         <div class="jai_detail_side">
             ${detail.avatar ? `<img referrerpolicy="no-referrer" src="${esc(avatarUrl(detail.avatar, 600))}" alt="">` : ''}
             <div class="menu_button menu_button_icon jai_import"><i class="fa-solid fa-file-import"></i><span>Import to SillyTavern</span></div>
+            ${scripts.shared.length ? '<div class="menu_button menu_button_icon jai_book_only" title="Save only the lorebook as a World Info file, without importing the character"><i class="fa-solid fa-book-atlas"></i><span>Lorebook only</span></div>' : ''}
             <div class="menu_button menu_button_icon jai_back"><i class="fa-solid fa-arrow-left"></i><span>Back to list</span></div>
             <a class="menu_button menu_button_icon" href="${SITE}/characters/${esc(detail.id)}" target="_blank" rel="noopener"><i class="fa-solid fa-up-right-from-square"></i><span>View on JanitorAI</span></a>
             <div class="menu_button menu_button_icon jai_raw" title="Copy the raw data JanitorAI sent for this character (useful for bug reports)"><i class="fa-solid fa-copy"></i><span>Copy raw data</span></div>
@@ -924,6 +939,20 @@ async function openDetail(id) {
     box.querySelector('.jai_back').addEventListener('click', () => ($('#jai_grid').children.length ? (setView('grid'), showMessage('')) : loadList()));
     box.querySelector('.jai_raw').addEventListener('click', async () => {
         await copyText(JSON.stringify(detail, null, 2), 'Raw character data copied to the clipboard.');
+    });
+
+    const bookButton = box.querySelector('.jai_book_only');
+    bookButton?.addEventListener('click', async () => {
+        if (bookButton.classList.contains('disabled')) return;
+        bookButton.classList.add('disabled');
+        try {
+            await importLorebookOnly(detail);
+        } catch (error) {
+            console.error(TAG, 'Lorebook import failed', error);
+            toastr.error(String(error?.message || error), 'Janitor Importer: lorebook import failed');
+        } finally {
+            bookButton.classList.remove('disabled');
+        }
     });
 
     const importButton = box.querySelector('.jai_import');

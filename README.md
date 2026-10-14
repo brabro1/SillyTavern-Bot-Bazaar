@@ -21,6 +21,8 @@ Click the broom button next to "Import content from external URL" in the charact
 - Open a character and press **Import to SillyTavern**. A shared lorebook becomes a World Info file
   that is linked to the character.
 - You can also paste a `janitorai.com/characters/...` link into the search box.
+- **Lorebook only** saves just the lorebook as a World Info file — handy when you already have the
+  character card from somewhere else and only miss its lorebook.
 
 ## Connecting your account
 
