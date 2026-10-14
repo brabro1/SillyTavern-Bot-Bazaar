@@ -26,6 +26,11 @@ Open it with the store button next to "Import content from external URL" in the 
   linked to the character.
 - **Lorebook only** saves just the lorebook — handy when you already have the card from elsewhere.
 - On Chub you can also browse **Lorebooks** and import them directly.
+- Each site has its own look: JanitorAI's purple cards, and a navy Chub theme with wide cards and the
+  character's portrait blurred behind its page.
+- Character pages show the creator's description with their own colours, fonts and styling, a
+  **Lorebooks** panel (name, kind — lorebook, linked, embedded or code script — and whether it can be
+  imported), a preview of the definition, and the **comments** with replies.
 - Paste a `janitorai.com/characters/…`, `janitorai.com/profiles/…`, `chub.ai/characters/…` or
   `chub.ai/lorebooks/…` link into the search box to jump straight to it.
 

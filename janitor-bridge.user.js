@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bot Bazaar bridge for SillyTavern
 // @namespace    sillytavern-bot-bazaar
-// @version      1.2.0
+// @version      1.3.0
 // @description  Lets the SillyTavern "Bot Bazaar" extension browse JanitorAI through your own logged-in JanitorAI tab.
 // @match        https://janitorai.com/*
 // @include      http://127.0.0.1:*/*
@@ -31,12 +31,12 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.2.0';
+    const VERSION = '1.3.0';
     const TAG = '[Bot Bazaar bridge]';
     const REQ = 'jai_req';
     const ACK = 'jai_ack';
     const RES = 'jai_res';
-    const API_PATH = /^\/hampter\/(characters|tags|script|profiles)([/?]|$)/;
+    const API_PATH = /^\/hampter\/(characters|tags|script|profiles|reviews)([/?]|$)/;
     const IMAGE_HOST = /^https:\/\/([a-z0-9-]+\.)*janitorai\.com\//i;
 
     if (location.hostname === 'janitorai.com') {

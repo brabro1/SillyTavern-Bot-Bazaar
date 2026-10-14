@@ -713,7 +713,8 @@ function chubModel(node) {
         creatorName: creator,
         verified: !!node.verified,
         blurb: esc(str(node.tagline).trim() || str(node.description).trim().slice(0, 300)),
-        stats: `<i class="fa-solid fa-star"></i> ${compact(node.starCount)} <i class="fa-solid fa-heart"></i> ${compact(node.n_favorites)}`,
+        stats: `<i class="fa-solid fa-star"></i> ${compact(node.starCount)} <i class="fa-solid fa-heart"></i> ${compact(node.n_favorites)}${relatedLorebooks(node).length ? ' <i class="fa-solid fa-book-atlas" title="Has linked lorebooks"></i>' : ''}`,
+        chats: node.nChats,
         statsTitle: `${compact(node.starCount)} stars · ${compact(node.n_favorites)} favorites · ${compact(node.nChats)} chats`,
         chips: topicChips(node.topics),
         tokens: node.nTokens,
@@ -764,7 +765,8 @@ async function fetchLinkedLorebook(id) {
     try {
         const world = await chubGet(chubRawLorebookUrl(id));
         const entries = (Array.isArray(world?.entries) ? world.entries : Object.values(world?.entries || {})).filter(e => e && typeof e === 'object');
-        result = entries.length ? { status: 'ok', entries } : { status: 'missing' };
+        const name = str(world?.name).trim();
+        result = entries.length ? { status: 'ok', entries, name: name && name !== 'Exported' ? name : '' } : { status: 'missing' };
     } catch (error) {
         console.warn(TAG, 'Linked Chub lorebook failed', id, error);
         // Chub answers 404 "Project not found" for deleted or private lorebooks.
@@ -916,28 +918,82 @@ function fullDate(iso) {
     return time ? new Date(time).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }) : '';
 }
 
-// Creators style their descriptions with colours and alignment; keep those, drop everything that could affect layout.
-const SAFE_STYLES = ['color', 'background-color', 'text-align', 'font-weight', 'font-style', 'text-decoration', 'text-decoration-line'];
+// Creators style their descriptions (colours, fonts, borders, even whole <style> blocks). Keep that styling, but only
+// properties that cannot move things out of the description box or reach outside it.
+const SAFE_CSS_PROPERTY = /^(--[\w-]+|color|background(-color|-image|-size|-position|-repeat|-clip|-origin)?|text-[\w-]+|font(-[\w-]+)?|line-height|letter-spacing|word-spacing|word-break|overflow-wrap|white-space|margin(-[\w-]+)?|padding(-[\w-]+)?|border(-[\w-]+)?|outline(-[\w-]+)?|box-shadow|box-sizing|(max-|min-)?(width|height)|display|opacity|vertical-align|list-style(-[\w-]+)?|gap|row-gap|column-gap|justify-[\w-]+|align-[\w-]+|place-[\w-]+|flex(-[\w-]+)?|order|grid(-[\w-]+)?|overflow(-[xy])?|float|clear|filter|animation(-[\w-]+)?|transition(-[\w-]+)?|cursor|object-fit|object-position|aspect-ratio|columns?(-[\w-]+)?|caret-color|accent-color)$/i;
+const UNSAFE_CSS_VALUE = /expression\s*\(|javascript:|url\(\s*['"]?(?!https:)/i;
+
+const safeDeclarations = (style) => {
+    const kept = [];
+    for (let i = 0; i < style.length; i++) {
+        const prop = style[i];
+        const value = style.getPropertyValue(prop);
+        if (SAFE_CSS_PROPERTY.test(prop) && value && !UNSAFE_CSS_VALUE.test(value)) {
+            kept.push(`${prop}:${value}${style.getPropertyPriority(prop) ? ' !important' : ''}`);
+        }
+    }
+    return kept.join(';');
+};
+
+/** Rewrites a creator's <style> block so every rule only applies inside their description. */
+function scopeCss(css, scope) {
+    const sheet = new CSSStyleSheet();
+    try {
+        sheet.replaceSync(css);
+    } catch {
+        return '';
+    }
+    const out = [];
+    const walk = (rules) => {
+        for (const rule of rules) {
+            if (rule instanceof CSSStyleRule) {
+                const declarations = safeDeclarations(rule.style);
+                if (!declarations) continue;
+                const selector = rule.selectorText.split(',')
+                    .map(s => s.trim().replace(/^(html|body|:root)\b\s*/i, '').replace(/\.(-?[_a-zA-Z][\w-]*)/g, '.u-$1'))
+                    .map(s => (s ? `${scope} ${s}` : scope))
+                    .join(', ');
+                out.push(`${selector}{${declarations}}`);
+            } else if (rule instanceof CSSMediaRule) {
+                out.push(`@media ${rule.conditionText}{`);
+                walk(rule.cssRules);
+                out.push('}');
+            } else if (rule instanceof CSSKeyframesRule && !UNSAFE_CSS_VALUE.test(rule.cssText)) {
+                out.push(rule.cssText);
+            }
+        }
+    };
+    walk(sheet.cssRules);
+    return out.join('\n');
+}
+
+let scopeCounter = 0;
 
 /**
- * Cleans creator-written HTML for display, keeping its colours.
+ * Cleans creator-written HTML for display, keeping the creator's styling.
  * @param {string} html Raw HTML
- * @param {boolean} [textOnly] Drop images and other media (used on the small cards)
+ * @param {boolean} [textOnly] Plain version for the small cards: no images, no styling blocks
  */
 function richHtml(html, textOnly = false) {
-    const clean = SillyTavern.libs.DOMPurify.sanitize(str(html), {
-        FORBID_TAGS: ['style', 'form', 'input', 'button', 'iframe', 'textarea', 'select', 'video', 'audio', 'object', 'embed', 'svg', 'math'],
-        FORBID_ATTR: ['class', 'id', 'srcset'],
+    const raw = str(html);
+    const styleBlocks = textOnly ? [] : [...raw.matchAll(/<style[^>]*>([\s\S]*?)<\/style>/gi)].map(m => m[1]);
+    const clean = SillyTavern.libs.DOMPurify.sanitize(raw, {
+        FORBID_TAGS: ['style', 'form', 'input', 'button', 'iframe', 'textarea', 'select', 'video', 'audio', 'object', 'embed', 'svg', 'math', 'link', 'meta', 'base'],
+        FORBID_ATTR: ['id', 'srcset'],
     });
     const template = document.createElement('template');
     template.innerHTML = clean;
     template.content.querySelectorAll('[style]').forEach((el) => {
-        const kept = SAFE_STYLES
-            .map(prop => [prop, el.style.getPropertyValue(prop)])
-            .filter(([, value]) => value && !/url\(|var\(|expression/i.test(value))
-            .map(([prop, value]) => `${prop}:${value}`);
-        if (kept.length) el.setAttribute('style', kept.join(';'));
+        const kept = textOnly
+            ? ['color', 'background-color', 'text-align', 'font-weight', 'font-style'].map(p => [p, el.style.getPropertyValue(p)]).filter(([, v]) => v).map(([p, v]) => `${p}:${v}`).join(';')
+            : safeDeclarations(el.style);
+        if (kept) el.setAttribute('style', kept);
         else el.removeAttribute('style');
+    });
+    // Creator class names only mean something to their own <style> block; prefix them so they can't hit SillyTavern's.
+    template.content.querySelectorAll('[class]').forEach((el) => {
+        if (textOnly) return el.removeAttribute('class');
+        el.setAttribute('class', el.getAttribute('class').split(/\s+/).filter(Boolean).map(c => `u-${c}`).join(' '));
     });
     template.content.querySelectorAll('a').forEach((a) => { a.target = '_blank'; a.rel = 'noopener noreferrer'; });
     template.content.querySelectorAll('img').forEach((img) => {
@@ -945,8 +1001,17 @@ function richHtml(html, textOnly = false) {
         img.referrerPolicy = 'no-referrer';
         img.loading = 'lazy';
     });
-    if (textOnly) template.content.querySelectorAll('hr, table, picture, figure').forEach(el => el.remove());
-    return template.innerHTML;
+    if (textOnly) {
+        template.content.querySelectorAll('hr, table, picture, figure').forEach(el => el.remove());
+        return template.innerHTML;
+    }
+
+    const scope = `jai_scope_${++scopeCounter}`;
+    const css = styleBlocks
+        .map(block => scopeCss(block, `.${scope}`))
+        .filter(Boolean)
+        .join('\n');
+    return `<div class="jai_authored ${scope}">${css ? `<style>${css.replace(/<\/style/gi, '')}</style>` : ''}${template.innerHTML}</div>`;
 }
 
 const verifiedBadge = (on) => (on ? ' <i class="fa-solid fa-circle-check jai_verified" title="Verified creator"></i>' : '');
@@ -1383,6 +1448,8 @@ function setView(view) {
 
 /** Draws the tabs for the current site and lists the active filters as removable chips. */
 function renderControls() {
+    root.classList.toggle('jai_theme_chub', state.source === 'chub');
+    updateStatus();
     root.querySelectorAll('#jai_sources .jai_tab').forEach(tab => tab.classList.toggle('jai_active', tab.dataset.source === state.source));
     const isChub = state.source === 'chub';
     $('#jai_kinds').style.display = isChub ? '' : 'none';
@@ -1564,10 +1631,254 @@ async function loadCreator(id) {
     if (!state.detail) box.style.display = '';
 }
 
+// ---------------------------------------------------------------------------------------------- character page sections
+
+const STATUS_LABEL = {
+    checking: ['jai_dim', 'fa-spinner fa-spin', 'Checking…'],
+    ok: ['jai_ok', 'fa-check', 'Will be imported'],
+    private: ['jai_bad', 'fa-lock', 'Contents kept private'],
+    missing: ['jai_bad', 'fa-ban', 'Deleted or private'],
+    unreadable: ['jai_bad', 'fa-triangle-exclamation', 'Could not be read'],
+    failed: ['jai_bad', 'fa-triangle-exclamation', 'Could not be checked'],
+    code: ['jai_dim', 'fa-code', 'Code — not supported'],
+};
+
+/**
+ * One box per lorebook: name, kind and whether it can be imported.
+ * @param {{name: string, kind: string, status: string, entries?: number, meta?: string}[]} books
+ */
+function booksPanel(books) {
+    if (!books.length) return '';
+    const rows = books.map((book) => {
+        const [cls, icon, label] = STATUS_LABEL[book.status] || STATUS_LABEL.checking;
+        return `
+            <div class="jai_book ${book.status === 'ok' ? 'jai_book_ok' : ''}">
+                <div class="jai_book_head">
+                    <b>${esc(book.name)}</b>
+                    <span class="jai_kind">${esc(book.kind)}</span>
+                </div>
+                <div class="jai_book_meta">
+                    <span class="${cls}"><i class="fa-solid ${icon}"></i> ${label}${book.status === 'ok' && book.entries ? ` · ${book.entries} entries` : ''}</span>
+                    ${book.meta ? `<span>${esc(book.meta)}</span>` : ''}
+                </div>
+            </div>`;
+    }).join('');
+    return `<div class="jai_section_title"><i class="fa-solid fa-book-atlas"></i> Lorebooks</div><div class="jai_books_grid">${rows}</div>`;
+}
+
+const scriptMeta = (script) => [
+    script.updated_at ? fullDate(script.updated_at) : '',
+    Number(script.message_count) ? `${compact(script.message_count)} messages` : '',
+].filter(Boolean).join(' · ');
+
+/** JanitorAI scripts → lorebook boxes. `results` maps script id → fetchScript() result once known. */
+function janitorBooks(scripts, results = null) {
+    return scripts.all.map((raw, i) => {
+        const script = tryJson(raw) || {};
+        const isCode = script.type === 'advanced';
+        const result = results?.get(String(script.id));
+        let status = 'checking';
+        if (isCode) status = 'code';
+        else if (script.is_public === false) status = 'private';
+        else if (result) status = result.status;
+        else if (!results && !signedIn()) status = 'failed';
+        return {
+            name: scriptTitle(script, i),
+            kind: isCode ? 'Advanced script' : 'Lorebook',
+            status,
+            entries: result?.entries?.length,
+            meta: scriptMeta(script),
+        };
+    });
+}
+
+/** Chub: the lorebook stored in the card plus every linked one. */
+function chubBooks(node, results = null) {
+    const books = [];
+    const embedded = node.definition?.embedded_lorebook;
+    if (Array.isArray(embedded?.entries) && embedded.entries.length) {
+        books.push({ name: str(embedded.name).trim() && embedded.name !== 'Exported' ? embedded.name : 'Built into the card', kind: 'Embedded', status: 'ok', entries: embedded.entries.length });
+    }
+    relatedLorebooks(node).forEach((id) => {
+        const result = results?.get(id);
+        books.push({ name: result?.name || `Linked lorebook #${id}`, kind: 'Linked', status: result ? result.status : 'checking', entries: result?.entries?.length });
+    });
+    return books;
+}
+
+/** Collapsible preview of the definition fields that are present. */
+function definitionPanel(fields) {
+    const present = fields.filter(([, text]) => str(text).trim());
+    if (!present.length) return '';
+    const parts = present.map(([label, text]) => `
+        <details class="jai_def">
+            <summary>${esc(label)} <span class="jai_dim">${compact(str(text).length)} chars</span></summary>
+            <div class="jai_def_text">${esc(text)}</div>
+        </details>`).join('');
+    return `<div class="jai_section_title"><i class="fa-solid fa-scroll"></i> Definition</div><div class="jai_defs">${parts}</div>`;
+}
+
+// ---------------------------------------------------------------------------------------------- comments
+
+const commentsPanel = (siteUrl, siteName) => `
+    <div class="jai_comments" data-loaded="0">
+        <div class="jai_section_title">
+            <i class="fa-regular fa-comments"></i> Comments
+            <span class="jai_comment_count jai_dim"></span>
+            <select class="jai_comment_sort" title="Order">
+                <option value="likes">Top</option>
+                <option value="newest">Newest</option>
+            </select>
+            <a class="jai_btn jai_small" href="${esc(siteUrl)}" target="_blank" rel="noopener" title="Comments are written on ${esc(siteName)}"><i class="fa-solid fa-pen"></i><span>Write on ${esc(siteName)}</span></a>
+        </div>
+        <div class="jai_comment_list"><div class="jai_dim"><i class="fa-solid fa-spinner fa-spin"></i> Loading comments…</div></div>
+        <div class="jai_btn jai_small jai_more_comments" style="display:none"><span>Load more</span></div>
+    </div>`;
+
+function commentHtml(c) {
+    return `
+        <div class="jai_comment ${c.pinned ? 'jai_pinned' : ''}" data-cid="${esc(c.id)}">
+            ${c.avatar ? `<img class="jai_comment_avatar" referrerpolicy="no-referrer" loading="lazy" src="${esc(c.avatar)}" alt="">` : '<div class="jai_comment_avatar"></div>'}
+            <div class="jai_comment_main">
+                <div class="jai_comment_head">
+                    <span class="jai_creator_link" data-creator="${esc(c.userId)}" data-name="${esc(c.user)}" data-source="${c.source}">@${esc(c.user)}${verifiedBadge(c.verified)}</span>
+                    ${c.pinned ? '<span class="jai_pin"><i class="fa-solid fa-thumbtack"></i> Pinned</span>' : ''}
+                    ${c.stars ? `<span class="jai_stars" title="${c.stars} of 5">${'★'.repeat(c.stars)}${'☆'.repeat(Math.max(0, 5 - c.stars))}</span>` : ''}
+                    <span class="jai_dim" title="${esc(fullDate(c.date))}">${esc(timeAgo(c.date))}</span>
+                </div>
+                ${c.text ? `<div class="jai_comment_text">${esc(c.text)}</div>` : ''}
+                <div class="jai_comment_foot">
+                    ${c.likes !== undefined ? `<span><i class="fa-regular fa-thumbs-up"></i> ${compact(c.likes)}</span>` : ''}
+                    ${c.replyCount ? `<span class="jai_link jai_replies_toggle"><i class="fa-solid fa-chevron-down"></i> ${c.replyCount} repl${c.replyCount > 1 ? 'ies' : 'y'}</span>` : ''}
+                </div>
+                <div class="jai_replies"></div>
+            </div>
+        </div>`;
+}
+
+const janitorComment = (c, pinned = false) => ({
+    source: 'janitor',
+    id: c.id,
+    user: c.user_profiles?.user_name || 'user',
+    userId: c.user_id,
+    avatar: c.user_profiles?.avatar ? (/^https?:/i.test(c.user_profiles.avatar) ? c.user_profiles.avatar : `https://ella.janitorai.com/avatars/${encodeURIComponent(c.user_profiles.avatar)}`) : '',
+    verified: c.user_profiles?.is_verified,
+    pinned: pinned && c.is_pinned,
+    date: c.created_at,
+    text: str(c.content),
+    likes: c.like_count,
+    replyCount: Number(c.comment_count) || 0,
+});
+
+const chubComment = (c) => ({
+    source: 'chub',
+    id: c.id,
+    user: c.username || 'user',
+    userId: c.username,
+    avatar: c.avatarUrl || '',
+    verified: false,
+    pinned: false,
+    date: c.commentAt || c.createdAt,
+    text: str(c.comment),
+    stars: Number(c.rating) || 0,
+    replyCount: Array.isArray(c.children) ? c.children.length : 0,
+});
+
+/**
+ * Loads comments into a panel created by commentsPanel().
+ * JanitorAI: /hampter/reviews/<character>?page&size&sortBy, replies at /hampter/reviews/comments/<review>.
+ * Chub: /api/project/<id>/ratings returns every rating with its replies in one go.
+ */
+function wireComments(box, source, ref) {
+    const panel = box.querySelector('.jai_comments');
+    if (!panel) return;
+    const list = panel.querySelector('.jai_comment_list');
+    const more = panel.querySelector('.jai_more_comments');
+    const sortSelect = panel.querySelector('.jai_comment_sort');
+    const pageSize = 20;
+    let page = 1;
+    let chubMap = null;
+    if (source === 'chub') sortSelect.style.display = 'none';
+
+    const load = async (reset) => {
+        if (reset) {
+            page = 1;
+            list.innerHTML = '<div class="jai_dim"><i class="fa-solid fa-spinner fa-spin"></i> Loading comments…</div>';
+        }
+        more.style.display = 'none';
+        try {
+            let items;
+            let hasMore = false;
+            if (source === 'chub') {
+                const result = await chubGet(`${CHUB_API}/api/project/${encodeURIComponent(ref)}/ratings`);
+                chubMap = result?.ratings_map || {};
+                const all = Object.values(chubMap);
+                items = all.filter(c => !c.parentId && (str(c.comment).trim() || c.rating))
+                    .sort((a, b) => Date.parse(b.commentAt || b.createdAt) - Date.parse(a.commentAt || a.createdAt))
+                    .map(chubComment);
+                panel.querySelector('.jai_comment_count').textContent = all.length ? `(${all.length})` : '';
+            } else {
+                const result = await api(`/hampter/reviews/${encodeURIComponent(ref)}?page=${page}&size=${pageSize}&sortBy=${sortSelect.value}`);
+                const raw = Array.isArray(result) ? result : (result?.data || []);
+                items = raw.map(c => janitorComment(c, true));
+                hasMore = raw.length === pageSize;
+            }
+            if (reset) list.innerHTML = '';
+            if (!items.length && reset) list.innerHTML = '<div class="jai_dim">No comments yet.</div>';
+            list.insertAdjacentHTML('beforeend', items.map(commentHtml).join(''));
+            more.style.display = hasMore ? '' : 'none';
+        } catch (error) {
+            console.warn(TAG, 'Comments failed', error);
+            if (reset) list.innerHTML = `<div class="jai_bad">${esc(error.code === 'auth' ? 'Connect your JanitorAI account to read comments.' : (error.message || 'Comments could not be loaded.'))}</div>`;
+        }
+    };
+
+    sortSelect.addEventListener('change', () => load(true));
+    more.addEventListener('click', () => { page++; load(false); });
+    list.addEventListener('click', async (event) => {
+        const toggle = event.target.closest('.jai_replies_toggle');
+        if (!toggle) return;
+        const comment = toggle.closest('.jai_comment');
+        const replies = comment.querySelector(':scope > .jai_comment_main > .jai_replies');
+        if (replies.dataset.open === '1') {
+            replies.dataset.open = '0';
+            replies.innerHTML = '';
+            return;
+        }
+        replies.dataset.open = '1';
+        replies.innerHTML = '<div class="jai_dim"><i class="fa-solid fa-spinner fa-spin"></i></div>';
+        try {
+            let items;
+            if (source === 'chub') {
+                const parent = chubMap?.[comment.dataset.cid];
+                items = (parent?.children || []).map(id => chubMap[id]).filter(Boolean).map(chubComment);
+            } else {
+                const result = await api(`/hampter/reviews/comments/${encodeURIComponent(comment.dataset.cid)}`);
+                items = (Array.isArray(result) ? result : (result?.data || [])).map(c => janitorComment(c));
+            }
+            replies.innerHTML = items.map(commentHtml).join('') || '<div class="jai_dim">No replies.</div>';
+        } catch (error) {
+            replies.innerHTML = `<div class="jai_bad">${esc(error.message || 'Replies could not be loaded.')}</div>`;
+        }
+    });
+
+    // Load when the panel scrolls into view, not before.
+    const observer = new IntersectionObserver((entries) => {
+        if (entries.some(e => e.isIntersecting) && panel.dataset.loaded === '0') {
+            panel.dataset.loaded = '1';
+            observer.disconnect();
+            load(true);
+        }
+    }, { root: root.querySelector('.jai_body'), rootMargin: '300px' });
+    observer.observe(panel);
+}
+
 async function openDetail(id) {
     setView('detail');
+    renderControls();
     state.detail = id;
     state.detailSource = 'janitor';
+    $('#jai_detail').style.removeProperty('--jai-backdrop');
     const box = $('#jai_detail');
     box.innerHTML = '';
     showMessage('<i class="fa-solid fa-spinner fa-spin"></i> Loading character…');
@@ -1646,10 +1957,20 @@ async function openDetail(id) {
                 <div class="jai_note jai_janny_note">If fetching fails: open the JannyAI page, download the card there, then pick that file with "Use downloaded card".</div>
             </div>` : ''}
             <div class="jai_tags">${tagChips(detail)}</div>
+            <div class="jai_books">${booksPanel(janitorBooks(scripts, signedIn() ? null : new Map()))}</div>
             <div class="jai_description jai_rich">${richHtml(detail.description)}</div>
+            ${definitionPanel([
+        ['Personality', detail.personality],
+        ['Scenario', detail.scenario],
+        ['First message', detail.first_message],
+        ...(Array.isArray(detail.first_messages) ? detail.first_messages : []).map(str).filter(g => g.trim() && g !== detail.first_message).map((g, i) => [`Greeting ${i + 2}`, g]),
+        ['Example dialogue', detail.example_dialogs],
+    ])}
+            ${commentsPanel(`${SITE}/characters/${detail.id}`, 'JanitorAI')}
         </div>`;
 
     box.querySelector('[data-jai-connect]')?.addEventListener('click', () => showConnect());
+    wireComments(box, 'janitor', detail.id);
     box.querySelector('.jai_back').addEventListener('click', () => ($('#jai_grid').children.length ? (setView('grid'), showMessage('')) : loadList()));
     box.querySelector('.jai_raw').addEventListener('click', async () => {
         await copyText(JSON.stringify(detail, null, 2), 'Raw character data copied to the clipboard.');
@@ -1698,9 +2019,9 @@ async function openDetail(id) {
             const results = [];
             for (const script of scripts.shared) {
                 try {
-                    results.push({ title: script.title, ...(await fetchScript(String(script.id))) });
+                    results.push({ id: String(script.id), title: script.title, ...(await fetchScript(String(script.id))) });
                 } catch {
-                    results.push({ title: script.title, status: 'unreadable' });
+                    results.push({ id: String(script.id), title: script.title, status: 'unreadable' });
                 }
                 if (state.detail !== id) return;
             }
@@ -1717,6 +2038,8 @@ async function openDetail(id) {
             fact.className = `jai_bookfact ${readable.length ? 'jai_ok' : 'jai_bad'}`;
             fact.innerHTML = `<i class="fa-solid fa-book-atlas"></i> ${esc(text)}`;
             if (!readable.length) box.querySelector('.jai_book_only')?.remove();
+            const panel = box.querySelector('.jai_books');
+            if (panel) panel.innerHTML = booksPanel(janitorBooks(scripts, new Map(results.map(r => [r.id, r]))));
         })();
     }
 
@@ -1754,6 +2077,7 @@ async function openDetail(id) {
 /** Character or lorebook page for Chub. */
 async function openChubDetail(fullPath) {
     setView('detail');
+    renderControls();
     state.detail = fullPath;
     state.detailSource = 'chub';
     const box = $('#jai_detail');
@@ -1780,6 +2104,8 @@ async function openChubDetail(fullPath) {
     if (related.length) bookParts.push(`${related.length} linked lorebook${related.length > 1 ? 's' : ''}`);
     const hasBook = isLorebook || bookParts.length > 0;
     const description = str(def.description).trim() || str(node.description).trim();
+    const backdrop = node.max_res_url || node.avatar_url;
+    if (backdrop) box.style.setProperty('--jai-backdrop', `url("${backdrop.replace(/["\\]/g, '')}")`);
 
     box.innerHTML = `
         <div class="jai_detail_side">
@@ -1815,11 +2141,22 @@ async function openChubDetail(fullPath) {
                 <span class="jai_bookfact ${embeddedCount ? 'jai_ok' : ''}"><i class="fa-solid fa-book-atlas"></i> ${related.length ? '<i class="fa-solid fa-spinner fa-spin"></i> Checking linked lorebooks…' : (bookParts.length ? `Lorebook: ${esc(bookParts.join(' + '))}` : 'No lorebook attached')}</span>`}
             </div>
             <div class="jai_tags">${topicChips(node.topics)}</div>
+            <div class="jai_books">${booksPanel(chubBooks(node))}</div>
             <div class="jai_description jai_rich">${description ? richHtml(markdownToHtml(description)) : '<i>No description.</i>'}</div>
+            ${isLorebook ? '' : definitionPanel([
+        ['Personality', def.personality],
+        ['Scenario', def.scenario],
+        ['First message', def.first_message],
+        ...(Array.isArray(def.alternate_greetings) ? def.alternate_greetings : []).map(str).filter(g => g.trim()).map((g, i) => [`Greeting ${i + 2}`, g]),
+        ['Example dialogue', def.example_dialogs],
+        ['System prompt', def.system_prompt],
+    ])}
+            ${commentsPanel(chubPageUrl(node.fullPath), 'Chub')}
         </div>`;
 
     box.querySelector('.jai_back').addEventListener('click', () => ($('#jai_grid').children.length ? (setView('grid'), showMessage('')) : loadList()));
     box.querySelector('.jai_raw').addEventListener('click', () => copyText(JSON.stringify(node, null, 2), 'Raw data copied to the clipboard.'));
+    wireComments(box, 'chub', node.id);
 
     const run = (button, label, task) => button?.addEventListener('click', async () => {
         if (button.classList.contains('jai_disabled')) return;
@@ -1862,6 +2199,8 @@ async function openChubDetail(fullPath) {
             fact.className = `jai_bookfact ${parts.length ? 'jai_ok' : 'jai_bad'}`;
             fact.innerHTML = `<i class="fa-solid fa-book-atlas"></i> ${esc(text)}`;
             if (!parts.length && !failed) box.querySelector('.jai_book_only')?.remove();
+            const panel = box.querySelector('.jai_books');
+            if (panel) panel.innerHTML = booksPanel(chubBooks(node, new Map(related.map((rid, i) => [rid, results[i]]))));
         })();
     }
 
