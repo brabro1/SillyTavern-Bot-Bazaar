@@ -1306,6 +1306,20 @@ function sauceGreetings(def) {
 
 const sauceHasDefinition = (def) => !!(sauceText(def?.card).trim() || sauceText(def?.example_dialogue).trim());
 
+// Saucepan shows definitions only on its own website: elsewhere it sends them scrambled, with a stand-in message
+// in "card". Bot Bazaar respects that and doesn't unscramble them; the user can paste the definition in instead.
+const SAUCE_STAND_IN = /running an old version|refresh (the|this) (page|tab)/i;
+
+/** A definition answer → { status: 'ok', def } or { status: 'protected' } (kept on Saucepan's site). */
+function sauceDefinitionResult(data) {
+    const def = sauceDefinition(data);
+    if (!def) return { status: 'hidden' };
+    const scrambled = Array.isArray(def.sections) && def.sections.some(section => section && typeof section.content === 'object');
+    const card = sauceText(def.card);
+    if (SAUCE_STAND_IN.test(card) || (scrambled && !card.trim())) return { status: 'protected' };
+    return sauceHasDefinition(def) ? { status: 'ok', def } : { status: 'protected' };
+}
+
 /**
  * Fetches the definition with the user's own login. Saucepan only sends it when the creator made it open (or the
  * account may otherwise see it); a hidden definition stays hidden.
@@ -1316,8 +1330,7 @@ async function fetchSauceDefinition(id) {
     if (!sauceAccount().token) return { status: sauceProxyOk === false ? 'bookmark' : 'login' };
     if (sauceProxyOk === false) return { status: 'bookmark' };
     try {
-        const def = sauceDefinition(await sauceFetch(`/api/v1/companion/definition?companion_id=${encodeURIComponent(id)}`));
-        return def ? { status: 'ok', def } : { status: 'hidden' };
+        return sauceDefinitionResult(await sauceFetch(`/api/v1/companion/definition?companion_id=${encodeURIComponent(id)}`));
     } catch (error) {
         if (error.code === 'proxy' || sauceProxyOk === false) return { status: 'bookmark' };
         if (error.code === 'auth') return { status: 'login', message: error.message };
@@ -1353,11 +1366,18 @@ function sauceEntries(data) {
     if (!best) return [];
     return best.map((o) => {
         const keyField = Object.keys(o).find(k => /key|trigger|word|activation/i.test(k) && (Array.isArray(o[k]) || typeof o[k] === 'string'));
+        const title = str(o.name || o.title || o.label).trim();
+        // Saucepan entries have a title but no keywords: the title becomes the keyword, so the entry comes up when
+        // it is mentioned. Titles that are just {{char}}/{{user}} stay always on.
+        // Headings like "LOVE & SEX" become separate words ("love", "sex") so they come up in normal chat.
+        const fromTitle = /^\{\{\w+\}\}$/.test(title) ? [] : [...new Set(title.split(/\s*(?:[,|/&+:;]|\band\b|\bor\b)\s*/i)
+            .map(t => t.replace(/[^\p{L}\p{N}'. -]+/gu, ' ').replace(/\s+/g, ' ').trim().toLowerCase())
+            .filter(t => t.length > 1))];
         return {
             ...o,
             content: str(TEXT.map(f => o[f]).find(v => typeof v === 'string' && v.trim())),
-            keys: keyField ? toList(o[keyField]) : [],
-            comment: str(o.name || o.title || o.label),
+            keys: keyField ? toList(o[keyField]) : fromTitle,
+            comment: title,
         };
     }).filter(e => e.content.trim());
 }
@@ -1482,6 +1502,7 @@ async function importSauceCharacter(c, defResult = null, attached = null) {
             bookmark: `The definition comes with your Saucepan login — to get it, ${SAUCE_BOOKMARK_TIP}. You come straight back here with everything.`,
             unverified: 'Saucepan only sends definitions to accounts with a verified email. Verify your email on saucepan.ai, then try again.',
             hidden: 'The creator keeps this definition hidden, so Saucepan does not send it.',
+            protected: 'Saucepan only shows definitions on its own website, so it can\'t be imported automatically. Use "Paste definition" on this page to add it yourself.',
             private: 'The creator keeps this definition hidden, so Saucepan does not send it.',
             failed: `Saucepan did not send the definition (${defResult.message || 'unknown error'}).`,
             ok: 'Saucepan sent an empty definition.',
@@ -1546,8 +1567,7 @@ function preloadSauceCompanion(p, verified) {
     const d = p.definition || {};
     let defResult;
     if (d.status === 200) {
-        const def = sauceDefinition(d.data);
-        defResult = def ? { status: 'ok', def } : { status: 'hidden' };
+        defResult = sauceDefinitionResult(d.data);
     } else {
         const reason = sauceRefusal(d.status, verified);
         defResult = { status: reason === 'private' ? 'hidden' : reason, message: d.message };
@@ -2606,7 +2626,7 @@ function showConnect(reason = '') {
             </div>
             <div class="jai_acc">
                 <div class="jai_acc_head"><b>Saucepan</b> ${sauceState}</div>
-                <p class="jai_note">For definitions, lorebooks and your Saucepan favorites. Pressed on a bot's Saucepan page, the bookmark also brings that bot here, ready to import — no setup needed.${sauce.token && !sauce.verified ? ' <b>Saucepan only sends definitions to accounts with a verified email</b> — verify yours on saucepan.ai.' : ''}</p>
+                <p class="jai_note">For search, lorebooks and your Saucepan favorites. Pressed on a bot's Saucepan page, the bookmark also brings that bot here, ready to import — no setup needed.${sauce.token && !sauce.verified ? ' <b>Saucepan only sends definitions to accounts with a verified email</b> — verify yours on saucepan.ai.' : ''}</p>
                 ${steps('Saucepan', 'open-sauce')}
                 ${sauce.token ? '<span class="jai_link" data-jai="disconnect-sauce">Disconnect Saucepan</span>' : ''}
             </div>
@@ -3666,7 +3686,7 @@ function showSauceSetup() {
             <ol class="jai_steps jai_sauce_steps">
                 <li>${button('open-sauce', 'fa-up-right-from-square', 'Open Saucepan')} <span>find a bot you like (signed in).</span></li>
                 <li>On the bot's page, press the <b>Bot Bazaar</b> bookmark.</li>
-                <li>You land back here on that bot — tap <b>Import</b>. Its definition, greetings and lorebooks come along.</li>
+                <li>You land back here on that bot — tap <b>Import</b>. Its picture, tags and lorebooks come along.</li>
             </ol>
             <p class="jai_note">Every press also brings your Saucepan favorites into <b>Favorites</b>${settings().sauceFavsAt ? ` (last time ${esc(timeAgo(new Date(settings().sauceFavsAt).toISOString()))})` : ''}. You can also paste a Saucepan link in the search box above to see a bot's page and comments here.${sauce.token ? '' : ' Pressing it the first time also connects your account.'}</p>
             <details class="jai_bm" ${settings().bookmarkSeen ? '' : 'open'}>
@@ -3694,6 +3714,8 @@ function sauceStatusFact(result, open) {
         case 'ok': return sauceHasDefinition(result.def) ? ['jai_ok', 'fa-check', 'Definition available'] : ['jai_bad', 'fa-lock', 'Saucepan sent no definition'];
         case 'login': return ['jai_bad', 'fa-key', 'Definition needs your Saucepan login'];
         case 'unverified': return ['jai_bad', 'fa-envelope', 'Verify your email on Saucepan to get definitions'];
+        case 'protected': return ['jai_bad', 'fa-shield-halved', 'Saucepan keeps definitions on its own site — paste it in yourself'];
+        case 'pasted': return ['jai_ok', 'fa-paste', 'Definition pasted by you'];
         case 'bookmark': return ['jai_dim', 'fa-bookmark', 'For the definition and lorebooks, press the Bot Bazaar bookmark on this bot\'s Saucepan page'];
         case 'hidden': return ['jai_bad', 'fa-lock', open === false ? 'Definition hidden by the creator' : 'Saucepan did not send the definition'];
         case 'failed': return ['jai_bad', 'fa-triangle-exclamation', `Definition could not be loaded: ${result.message || ''}`];
@@ -3778,6 +3800,7 @@ async function openSauceDetail(id, preload = null) {
                 <div class="jai_jactions">
                     <div class="jai_btn jai_primary jai_import"><i class="fa-solid fa-file-import"></i><span>Import to SillyTavern</span></div>
                     ${favAction({ source: 'saucepan', id: c.id, name: m.name, image: m.image, creator: c.author_handle, creatorId: c.author_id, kind: 'character' })}
+                    <div class="jai_btn jai_sauce_paste" style="display:none" title="Copy the definition from the bot's Saucepan page and paste it here"><i class="fa-solid fa-paste"></i><span>Paste definition</span></div>
                     ${m.books ? '<div class="jai_btn jai_book_only" title="Save only the lorebooks as a World Info file"><i class="fa-solid fa-book-atlas"></i><span>Lorebook only</span></div>' : ''}
                     <a class="jai_btn" href="${esc(saucePage(c.id))}" target="_blank" rel="noopener" title="View on Saucepan"><i class="fa-solid fa-up-right-from-square"></i><span>Saucepan</span></a>
                     <div class="jai_btn jai_raw" title="Copy the raw data Saucepan sent (useful for bug reports)"><i class="fa-solid fa-copy"></i></div>
@@ -3807,13 +3830,15 @@ async function openSauceDetail(id, preload = null) {
     let defResult = preload ? preload.defResult : (connected ? null : noLogin);
     let attached = preload?.attached || null;
     const defSource = preload ? Promise.resolve(preload.defResult) : (connected ? fetchSauceDefinition(c.id) : null);
-    const defReady = defSource ? defSource.then((result) => {
+    const showDefinition = (result) => {
         defResult = result;
         if (state.detail !== id) return;
-        const [cls, icon, text] = sauceStatusFact(result, c.open_definition);
+        const [cls, icon, text] = sauceStatusFact(result.pasted ? { status: 'pasted' } : result, c.open_definition);
         const fact = box.querySelector('.jai_deffact');
         fact.className = `jai_deffact ${cls}`;
         fact.innerHTML = `<i class="fa-solid ${icon}"></i> ${esc(text)}`;
+        // Saucepan doesn't hand the definition over, but it shows it to you on its site: copy it from there.
+        box.querySelector('.jai_sauce_paste').style.display = result.status === 'ok' && !result.pasted ? 'none' : '';
         if (result.status === 'ok') {
             const def = result.def;
             const greetings = sauceGreetings(def);
@@ -3825,7 +3850,23 @@ async function openSauceDetail(id, preload = null) {
                 ['Formatting instructions', sauceText(def.formatting_instructions)],
             ]);
         }
-    }).catch(error => showError(error)) : Promise.resolve();
+    };
+    if (!defSource) showDefinition(defResult);
+    const defReady = defSource ? defSource.then(showDefinition).catch(error => showError(error)) : Promise.resolve();
+
+    box.querySelector('.jai_sauce_paste').addEventListener('click', async () => {
+        const { Popup } = ctx();
+        const card = await Popup.show.input(
+            'Paste the definition',
+            `On Saucepan, open <a href="${esc(saucePage(c.id))}" target="_blank" rel="noopener">this bot's page</a>, open its definition, copy it and paste it here. It becomes the character's description.`,
+            sauceText(defResult?.pasted ? defResult.def.card : ''),
+            { rows: 12 },
+        );
+        if (typeof card !== 'string' || !card.trim()) return;
+        const greeting = await Popup.show.input('First message (optional)', 'Paste the greeting / starting scenario too, or leave it empty.', sauceGreetings(defResult?.pasted ? defResult.def : null)[0] || '', { rows: 8 });
+        showDefinition({ status: 'ok', pasted: true, def: { card: card.trim(), starting_scenarios: typeof greeting === 'string' && greeting.trim() ? [greeting.trim()] : [] } });
+        toastr.success('Definition added. Press "Import to SillyTavern".', 'Bot Bazaar');
+    });
 
     if (canBooks && (m.books || attached?.length)) {
         (async () => {

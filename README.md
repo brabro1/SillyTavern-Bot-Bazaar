@@ -50,23 +50,22 @@ Browsing needs nothing — Chub's API is public. Linked lorebooks are merged wit
 
 ## Saucepan
 
-**No setup needed.** Saucepan only answers its own website, so the Bot Bazaar bookmark does the work there:
+Saucepan works like the other sites — browse, search, tags, creators, comments, favorites and import — once
+SillyTavern's built-in proxy is on (Saucepan only answers its own website, so SillyTavern has to ask on your
+behalf). Switch it on once: in `config.yaml` set `enableCorsProxy: true` and restart SillyTavern. The Saucepan tab
+has copy-paste commands for it (Windows, Android/Termux, Linux, Mac).
 
-1. Open Saucepan (signed in) and go to a bot's page.
-2. Press the **Bot Bazaar** bookmark.
-3. You land back in SillyTavern on that bot — tap **Import**. Its definition, greetings (starting scenarios),
-   example dialogue, advanced prompt, formatting instructions and lorebooks come along.
+- Connect your account with the same Bot Bazaar bookmark (on saucepan.ai). Your email must be verified on
+  Saucepan for lorebooks.
+- **Imported:** picture, name, short description, tags, creator, and every lorebook the creator made open
+  (entry titles become the trigger words).
+- **Definitions:** Saucepan deliberately shows definitions only on its own website (everywhere else it sends
+  them scrambled), and Bot Bazaar respects that. For bots whose creator made the definition open, copy it from
+  the bot's Saucepan page and press **Paste definition** before importing.
 
-Every press also brings your Saucepan favorites into **Favorites**, and the first press connects your account.
-Pressed on a lorebook's page, it brings that lorebook. Works the same on phones.
-Pasting a Saucepan link into the search box shows that bot's page and comments without any setup too.
-
-**Saucepan only sends definitions and lorebooks to accounts with a verified email**, so verify yours on
-saucepan.ai first.
-
-**Optional — browse and search Saucepan inside Bot Bazaar:** that needs SillyTavern's built-in proxy switched on
-once. The Saucepan tab has copy-paste commands for it (Windows, Android/Termux, Linux, Mac); or open `config.yaml`,
-change `enableCorsProxy: false` to `enableCorsProxy: true`, and restart SillyTavern.
+Without the proxy, Saucepan still works through the bookmark: press it on a bot's Saucepan page and you land back
+in Bot Bazaar on that bot, ready to import (it also brings your favorites). Pasted Saucepan links show the bot's
+page and comments too.
 
 ## Connecting your accounts
 
@@ -89,7 +88,7 @@ cancel Bot Bazaar's copy of the login, because the website renews it too. To avo
 private/incognito window, press the bookmark there, and close the window without logging out.
 
 - **Chub** only needs connecting for your Chub favorites; browsing never needs it.
-- **Saucepan** stays connected once connected; on a bot's page the same bookmark also imports that bot.
+- **Saucepan** stays connected once connected; on a bot's page the same bookmark also brings that bot over.
 
 Desktop alternative for JanitorAI with nothing to press: install [Tampermonkey](https://www.tampermonkey.net/),
 switch on **Allow User Scripts** for it, and install `janitor-bridge.user.js` from this repository.
