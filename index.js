@@ -1495,14 +1495,15 @@ async function importSauceCharacter(c, defResult = null, attached = null) {
     const { Popup } = ctx();
     const name = safeName(c.display_name || c.name) || 'Saucepan character';
     defResult ??= await fetchSauceDefinition(c.id);
-    const def = defResult.status === 'ok' ? defResult.def : null;
+    // Even without a definition, greetings the page showed are kept.
+    const def = defResult.def || null;
     if (!sauceHasDefinition(def)) {
         const why = {
             login: 'Your Saucepan account is not connected, so the definition and lorebooks are not available.',
             bookmark: `The definition comes with your Saucepan login — to get it, ${SAUCE_BOOKMARK_TIP}. You come straight back here with everything.`,
             unverified: 'Saucepan only sends definitions to accounts with a verified email. Verify your email on saucepan.ai, then try again.',
             hidden: 'The creator keeps this definition hidden, so Saucepan does not send it.',
-            protected: 'Saucepan only shows definitions on its own website, so it can\'t be imported automatically. Use "Paste definition" on this page to add it yourself.',
+            protected: 'Saucepan shows definitions only on its own page. Tap "Get definition from Saucepan", then press the Bot Bazaar bookmark on that page — the bot comes back here with its definition and greetings.',
             private: 'The creator keeps this definition hidden, so Saucepan does not send it.',
             failed: `Saucepan did not send the definition (${defResult.message || 'unknown error'}).`,
             ok: 'Saucepan sent an empty definition.',
@@ -1562,12 +1563,62 @@ const sauceComment = (c) => ({
 
 // ---- what the bookmark brings back from saucepan.ai (it runs there, with the user's own login)
 
+const escapeRegex = (text) => str(text).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/**
+ * What the bot's Saucepan page showed (the bookmark opened "Definition → Show" and "View scenarios" there, as you
+ * would by hand) → a definition. Section titles come from Saucepan; the page puts your persona name where the
+ * greetings say {{user}}, so that is turned back.
+ */
+function sauceShownDefinition(shown, titles = []) {
+    const text = str(shown?.definition).replace(/\r/g, '').trim();
+    const persona = str(shown?.persona).trim();
+    const unPersona = (t) => (persona ? t.replace(new RegExp(`(?<![\\p{L}\\p{N}])${escapeRegex(persona)}(?![\\p{L}\\p{N}])`, 'gu'), '{{user}}') : t);
+    const scenarios = (Array.isArray(shown?.scenarios) ? shown.scenarios : []).map(s => unPersona(str(s?.message)).trim()).filter(Boolean);
+    if (!text && !scenarios.length) return null;
+
+    const def = { card: '', example_dialogue: '', advanced_prompt: '', formatting_instructions: '', starting_scenarios: scenarios };
+    const firstLine = text.split('\n')[0].trim();
+    const known = titles.length ? titles : (firstLine && firstLine.length < 40 ? [firstLine] : []);
+    const marks = [];
+    let from = 0;
+    for (const title of known) {
+        const re = new RegExp(`(^|\\n)${escapeRegex(title)}\\n`, 'g');
+        re.lastIndex = from;
+        const m = re.exec(text);
+        if (!m) continue;
+        marks.push({ title, start: m.index + m[1].length, body: m.index + m[0].length });
+        from = m.index + m[0].length;
+    }
+    if (!marks.length) {
+        def.card = text;
+        return def;
+    }
+    if (marks[0].start > 0) def.card = text.slice(0, marks[0].start).trim();
+    const cards = marks.filter(mk => !/example|dialog|format|advanced|system/i.test(mk.title)).length;
+    marks.forEach((mk, i) => {
+        const body = text.slice(mk.body, i + 1 < marks.length ? marks[i + 1].start : undefined).trim();
+        const field = /example|dialog/i.test(mk.title) ? 'example_dialogue'
+            : (/format/i.test(mk.title) ? 'formatting_instructions' : (/advanced|system/i.test(mk.title) ? 'advanced_prompt' : 'card'));
+        // With several card sections, keep their titles as headings.
+        const part = field === 'card' && cards > 1 ? `${mk.title}\n${body}` : body;
+        def[field] = [def[field], part].filter(Boolean).join('\n\n');
+    });
+    return def;
+}
+
 /** A character the bookmark collected on its Saucepan page → what openSauceDetail() needs, no network. */
 function preloadSauceCompanion(p, verified) {
     const d = p.definition || {};
+    const shown = sauceShownDefinition(p.shown, Array.isArray(d.titles) ? d.titles : []);
     let defResult;
-    if (d.status === 200) {
-        defResult = sauceDefinitionResult(d.data);
+    if (shown && sauceHasDefinition(shown)) {
+        defResult = { status: 'ok', def: shown, fromPage: true };
+    } else if (d.status === 200) {
+        // Open on Saucepan, but the page didn't show it to the bookmark: greetings (if any) still come along.
+        defResult = { status: 'protected', def: shown };
+    } else if (shown) {
+        defResult = { status: 'hidden', def: shown };
     } else {
         const reason = sauceRefusal(d.status, verified);
         defResult = { status: reason === 'private' ? 'hidden' : reason, message: d.message };
@@ -3711,10 +3762,12 @@ function showSauceSetup() {
 
 function sauceStatusFact(result, open) {
     switch (result?.status) {
-        case 'ok': return sauceHasDefinition(result.def) ? ['jai_ok', 'fa-check', 'Definition available'] : ['jai_bad', 'fa-lock', 'Saucepan sent no definition'];
+        case 'ok':
+            if (!sauceHasDefinition(result.def)) return ['jai_bad', 'fa-lock', 'Saucepan sent no definition'];
+            return result.fromPage ? ['jai_ok', 'fa-check', `Definition${sauceGreetings(result.def).length ? ` and ${sauceGreetings(result.def).length} greeting${sauceGreetings(result.def).length > 1 ? 's' : ''}` : ''} read from its Saucepan page`] : ['jai_ok', 'fa-check', 'Definition available'];
         case 'login': return ['jai_bad', 'fa-key', 'Definition needs your Saucepan login'];
         case 'unverified': return ['jai_bad', 'fa-envelope', 'Verify your email on Saucepan to get definitions'];
-        case 'protected': return ['jai_bad', 'fa-shield-halved', 'Saucepan keeps definitions on its own site — paste it in yourself'];
+        case 'protected': return ['jai_bad', 'fa-shield-halved', 'Saucepan shows definitions only on its own page — tap "Get definition from Saucepan"'];
         case 'pasted': return ['jai_ok', 'fa-paste', 'Definition pasted by you'];
         case 'bookmark': return ['jai_dim', 'fa-bookmark', 'For the definition and lorebooks, press the Bot Bazaar bookmark on this bot\'s Saucepan page'];
         case 'hidden': return ['jai_bad', 'fa-lock', open === false ? 'Definition hidden by the creator' : 'Saucepan did not send the definition'];
@@ -3800,6 +3853,7 @@ async function openSauceDetail(id, preload = null) {
                 <div class="jai_jactions">
                     <div class="jai_btn jai_primary jai_import"><i class="fa-solid fa-file-import"></i><span>Import to SillyTavern</span></div>
                     ${favAction({ source: 'saucepan', id: c.id, name: m.name, image: m.image, creator: c.author_handle, creatorId: c.author_id, kind: 'character' })}
+                    <a class="jai_btn jai_primary jai_sauce_fetch" style="display:none" href="${esc(saucePage(c.id))}" target="_blank" rel="noopener" title="Opens this bot on Saucepan: press the Bot Bazaar bookmark there and it comes back here with its definition and greetings"><i class="fa-solid fa-wand-magic-sparkles"></i><span>Get definition from Saucepan</span></a>
                     <div class="jai_btn jai_sauce_paste" style="display:none" title="Copy the definition from the bot's Saucepan page and paste it here"><i class="fa-solid fa-paste"></i><span>Paste definition</span></div>
                     ${m.books ? '<div class="jai_btn jai_book_only" title="Save only the lorebooks as a World Info file"><i class="fa-solid fa-book-atlas"></i><span>Lorebook only</span></div>' : ''}
                     <a class="jai_btn" href="${esc(saucePage(c.id))}" target="_blank" rel="noopener" title="View on Saucepan"><i class="fa-solid fa-up-right-from-square"></i><span>Saucepan</span></a>
@@ -3838,7 +3892,9 @@ async function openSauceDetail(id, preload = null) {
         fact.className = `jai_deffact ${cls}`;
         fact.innerHTML = `<i class="fa-solid ${icon}"></i> ${esc(text)}`;
         // Saucepan doesn't hand the definition over, but it shows it to you on its site: copy it from there.
-        box.querySelector('.jai_sauce_paste').style.display = result.status === 'ok' && !result.pasted ? 'none' : '';
+        const missing = !(result.status === 'ok' && sauceHasDefinition(result.def));
+        box.querySelector('.jai_sauce_paste').style.display = missing || result.pasted ? '' : 'none';
+        box.querySelector('.jai_sauce_fetch').style.display = missing && ['protected', 'bookmark', 'login'].includes(result.status) && c.open_definition !== false ? '' : 'none';
         if (result.status === 'ok') {
             const def = result.def;
             const greetings = sauceGreetings(def);
@@ -3854,6 +3910,9 @@ async function openSauceDetail(id, preload = null) {
     if (!defSource) showDefinition(defResult);
     const defReady = defSource ? defSource.then(showDefinition).catch(error => showError(error)) : Promise.resolve();
 
+    box.querySelector('.jai_sauce_fetch').addEventListener('click', () => {
+        toastr.info('On the Saucepan page that opened, press the Bot Bazaar bookmark — this bot comes back with its definition and greetings.', 'Bot Bazaar', { timeOut: 15000 });
+    });
     box.querySelector('.jai_sauce_paste').addEventListener('click', async () => {
         const { Popup } = ctx();
         const card = await Popup.show.input(
@@ -4066,7 +4125,69 @@ async function botBazaarBookmark(ST) {
         const u = me.data && (me.data.user || me.data);
         if (u && u.id) sauce.me = { id: u.id, handle: u.handle, is_verified: u.is_verified };
         const page = location.pathname.match(/\/(companion|lorebook)\/([0-9a-f-]{36})/i);
+        // Saucepan sends definitions to other apps only scrambled, but shows them on this page to you. So, like you
+        // would by hand, open the page's own "Definition → Show" and "View scenarios", and read what it displays.
+        const wait = ms => new Promise(r => setTimeout(r, ms));
+        const reveal = async (button) => {
+            const added = [];
+            const mo = new MutationObserver(ms => ms.forEach(m => m.addedNodes.forEach(x => { if (x.nodeType === 1) added.push(x); })));
+            mo.observe(document.body, { childList: true, subtree: true });
+            button.click();
+            for (let i = 0; i < 20 && !added.some(x => x.innerText && x.innerText.length > 40); i++) await wait(150);
+            await wait(300);
+            mo.disconnect();
+            const top = added.filter(x => x.isConnected && !added.some(o => o !== x && o.contains(x)));
+            return top.sort((a, b) => b.innerText.length - a.innerText.length)[0] || null;
+        };
+        const readPage = async () => {
+            const out = {};
+            // "Definition: Open — Show": the label has its own text plus the state inside it. Wait for the page to draw it.
+            const findLabel = () => [].slice.call(document.querySelectorAll('body *')).find(e => [].slice.call(e.childNodes).some(n => n.nodeType === 3 && /^\s*Definition:?\s*$/.test(n.textContent)));
+            let label = findLabel();
+            for (let i = 0; i < 40 && !label; i++) { await wait(200); label = findLabel(); }
+            let btn = null;
+            for (let n = label, i = 0; n && i < 5 && !btn; i++) {
+                n = n.parentElement;
+                btn = n && [].slice.call(n.querySelectorAll('button')).find(b => /^(show|hide)$/i.test(b.innerText.trim()));
+            }
+            if (btn) {
+                if (/hide/i.test(btn.innerText)) { btn.click(); await wait(500); }
+                const box = await reveal(btn);
+                if (box) out.definition = box.innerText;
+                btn.click();
+            }
+            const scen = [].slice.call(document.querySelectorAll('button')).find(b => /^view .*scenarios?$/i.test(b.innerText.trim()));
+            if (scen) {
+                const dialog = await reveal(scen);
+                const list = [];
+                let persona = '';
+                for (let i = 0; dialog && i < 30; i++) {
+                    const text = dialog.innerText;
+                    const m = text.match(/Scenario (\d+) of (\d+)\n/);
+                    if (!m) break;
+                    const lines = text.split('\n');
+                    const end = text.indexOf('\nPrev\n', m.index);
+                    const msg = text.slice(m.index + m[0].length, end > 0 ? end : undefined).trim();
+                    const head = text.slice(0, m.index).split('\n').filter(l => l.trim() && !/can be edited/i.test(l));
+                    const pi = lines.lastIndexOf('Start Chat');
+                    if (pi > 0) persona = lines[pi - 1].trim();
+                    list.push({ title: head[head.length - 1] || '', message: msg });
+                    if (Number(m[1]) >= Number(m[2])) break;
+                    const next = [].slice.call(dialog.querySelectorAll('button')).find(b => b.innerText.trim() === 'Next');
+                    if (!next) break;
+                    next.click();
+                    for (let k = 0; k < 20 && dialog.innerText.indexOf('Scenario ' + (Number(m[1]) + 1) + ' of') < 0; k++) await wait(100);
+                }
+                out.scenarios = list;
+                out.persona = persona;
+                document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+            }
+            return out;
+        };
         if (page && page[1].toLowerCase() === 'companion') {
+            note.textContent = 'Bot Bazaar: reading this character…';
+            let shown = {};
+            try { shown = await readPage(); } catch (e) { /* the page didn't show it; the rest still comes */ }
             note.textContent = 'Bot Bazaar: getting this character…';
             const id = page[2];
             const c = await call('/api/v2/companions/' + id);
@@ -4079,7 +4200,9 @@ async function botBazaarBookmark(ST) {
                 const r = await call('/api/v1/lorebooks/' + b.id);
                 books.push({ meta: b, status: r.status, data: r.status === 200 ? r.data : null });
             }
-            sauce.companion = { data: c.data, definition: { status: d.status, data: d.status === 200 ? d.data : null, message: d.data && d.data.error ? d.data.error.message : '' }, books: books, booksStatus: l.status };
+            const titles = d.data && Array.isArray(d.data.sections) ? d.data.sections.map(s => s && s.title).filter(Boolean) : [];
+            // The scrambled copy isn't sent along; what the page showed is.
+            sauce.companion = { data: c.data, definition: { status: d.status, data: null, titles: titles, message: d.data && d.data.error ? d.data.error.message : '' }, shown: shown, books: books, booksStatus: l.status };
         } else if (page) {
             note.textContent = 'Bot Bazaar: getting this lorebook…';
             const r = await call('/api/v1/lorebooks/' + page[2]);

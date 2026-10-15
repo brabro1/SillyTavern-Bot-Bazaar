@@ -59,9 +59,11 @@ has copy-paste commands for it (Windows, Android/Termux, Linux, Mac).
   Saucepan for lorebooks.
 - **Imported:** picture, name, short description, tags, creator, and every lorebook the creator made open
   (entry titles become the trigger words).
-- **Definitions:** Saucepan deliberately shows definitions only on its own website (everywhere else it sends
-  them scrambled), and Bot Bazaar respects that. For bots whose creator made the definition open, copy it from
-  the bot's Saucepan page and press **Paste definition** before importing.
+- **Definitions and greetings:** Saucepan only shows definitions on its own page (other apps get a scrambled
+  copy). So on a bot's page, press the **Bot Bazaar bookmark**: it opens the page's own *Definition → Show* and
+  *View scenarios*, reads what Saucepan shows you there, and comes back to Bot Bazaar with the definition, every
+  greeting (your persona name turned back into `{{user}}`) and the lorebooks — tap **Import**. While browsing in
+  Bot Bazaar, **Get definition from Saucepan** opens that page for you. Hidden definitions stay hidden.
 
 Without the proxy, Saucepan still works through the bookmark: press it on a bot's Saucepan page and you land back
 in Bot Bazaar on that bot, ready to import (it also brings your favorites). Pasted Saucepan links show the bot's
