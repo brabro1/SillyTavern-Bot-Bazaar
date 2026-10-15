@@ -1113,12 +1113,44 @@ function storeSauceToken(token, user = {}) {
 let sauceProxyOk = null;
 
 /**
- * One Saucepan API call. GET without a body, POST with one.
+ * Without the proxy, SillyTavern's own "visit web page" route can still read Saucepan's public pages (a
+ * character, its comments, a creator) — no setup, but no login and no search.
+ */
+async function sauceVisit(path) {
+    let response;
+    try {
+        response = await fetch('/api/search/visit', { method: 'POST', headers: ctx().getRequestHeaders(), body: JSON.stringify({ url: SAUCE + path, html: false }) });
+    } catch {
+        throw new ApiError('network', 'Could not reach SillyTavern.');
+    }
+    // SillyTavern answers 500 for anything Saucepan refused or doesn't have.
+    if (!response.ok) throw new ApiError('http', 'Saucepan did not send this page (it may be private, deleted or need a login).');
+    return response.json();
+}
+
+const PROXY_OFF = 'SillyTavern\'s proxy is switched off.';
+
+/**
+ * One Saucepan API call. GET without a body, POST with one. Goes through SillyTavern's proxy; when that is off,
+ * public GETs fall back to sauceVisit() and everything else reports code "proxy".
  * @param {string} path e.g. "/api/v1/search"
  * @param {object|null} [body]
  * @param {{token?: string}} [options] use this login instead of the saved one
  */
-async function sauceFetch(path, body = null, { token = sauceAccount().token } = {}) {
+async function sauceFetch(path, body = null, options = {}) {
+    if (sauceProxyOk === false) {
+        if (!body) return sauceVisit(path);
+        throw new ApiError('proxy', PROXY_OFF);
+    }
+    try {
+        return await sauceProxyFetch(path, body, options);
+    } catch (error) {
+        if (error.code === 'proxy' && !body) return sauceVisit(path);
+        throw error;
+    }
+}
+
+async function sauceProxyFetch(path, body = null, { token = sauceAccount().token } = {}) {
     const headers = {
         // SillyTavern checks this on its own side; its proxy removes it before forwarding.
         'X-CSRF-Token': ctx().getRequestHeaders()['X-CSRF-Token'],
@@ -1136,12 +1168,12 @@ async function sauceFetch(path, body = null, { token = sauceAccount().token } = 
     const text = await response.text();
     if (/CORS proxy is disabled/i.test(text)) {
         sauceProxyOk = false;
-        throw new ApiError('proxy', 'SillyTavern\'s proxy is switched off.');
+        throw new ApiError('proxy', PROXY_OFF);
     }
     if (!/^\s*[{[]/.test(text)) {
         if (response.status === 403 && /csrf/i.test(text)) {
             sauceProxyOk = false;
-            throw new ApiError('proxy', 'SillyTavern\'s proxy is switched off.');
+            throw new ApiError('proxy', PROXY_OFF);
         }
         throw new ApiError('http', `Saucepan sent an unexpected answer (${response.status}). ${text.slice(0, 120)}`);
     }
@@ -1277,15 +1309,17 @@ const sauceHasDefinition = (def) => !!(sauceText(def?.card).trim() || sauceText(
 /**
  * Fetches the definition with the user's own login. Saucepan only sends it when the creator made it open (or the
  * account may otherwise see it); a hidden definition stays hidden.
- * @returns {Promise<{status: 'ok'|'hidden'|'login'|'unverified'|'failed', def?: object, message?: string}>}
+ * Without the proxy only the bookmark (pressed on the bot's Saucepan page) can bring it: status "bookmark".
+ * @returns {Promise<{status: 'ok'|'hidden'|'login'|'unverified'|'failed'|'bookmark', def?: object, message?: string}>}
  */
 async function fetchSauceDefinition(id) {
-    if (!sauceAccount().token) return { status: 'login' };
+    if (!sauceAccount().token) return { status: sauceProxyOk === false ? 'bookmark' : 'login' };
+    if (sauceProxyOk === false) return { status: 'bookmark' };
     try {
         const def = sauceDefinition(await sauceFetch(`/api/v1/companion/definition?companion_id=${encodeURIComponent(id)}`));
         return def ? { status: 'ok', def } : { status: 'hidden' };
     } catch (error) {
-        if (error.code === 'proxy') throw error;
+        if (error.code === 'proxy' || sauceProxyOk === false) return { status: 'bookmark' };
         if (error.code === 'auth') return { status: 'login', message: error.message };
         if (/verif/i.test(error.message) || (!sauceAccount().verified && error.status === 403)) return { status: 'unverified', message: error.message };
         if (error.status === 403 || error.status === 404) return { status: 'hidden', message: error.message };
@@ -1334,35 +1368,50 @@ const sauceBookCache = new Map();
  * Downloads one Saucepan lorebook with the user's login.
  * @returns {Promise<{status: 'ok'|'private'|'failed', entries?: object[], name?: string}>}
  */
+/** What Saucepan refusing (HTTP status) means for the user. Unverified accounts are refused everything. */
+function sauceRefusal(status, verified = sauceAccount().verified) {
+    if (status === 401) return 'login';
+    if (status === 403 || status === 404) return verified ? 'private' : 'unverified';
+    return 'failed';
+}
+
+/** A lorebook answer (from the API or brought by the bookmark) → cache entry. */
+function sauceBookResult(data, status = 200, verified = sauceAccount().verified) {
+    if (status !== 200) return { status: sauceRefusal(status, verified) };
+    const entries = sauceEntries(data);
+    return entries.length ? { status: 'ok', entries, name: str(data?.lorebook?.name || data?.name) } : { status: 'private' };
+}
+
 async function fetchSauceLorebook(id) {
     if (sauceBookCache.has(id)) return sauceBookCache.get(id);
+    if (sauceProxyOk === false || !sauceAccount().token) return { status: 'bookmark' };
     let result;
     try {
-        const data = await sauceFetch(`/api/v1/lorebooks/${encodeURIComponent(id)}`);
-        const entries = sauceEntries(data);
-        result = entries.length ? { status: 'ok', entries, name: str(data?.lorebook?.name || data?.name) } : { status: 'private' };
+        result = sauceBookResult(await sauceFetch(`/api/v1/lorebooks/${encodeURIComponent(id)}`));
     } catch (error) {
-        if (error.code === 'proxy') throw error;
+        if (error.code === 'proxy' || sauceProxyOk === false) return { status: 'bookmark' };
         console.warn(TAG, 'Saucepan lorebook failed', id, error);
-        const refused = error.status === 403 || error.status === 404;
-        // Unverified accounts are refused everything, so don't blame the creator for that.
-        result = { status: refused ? (sauceAccount().verified ? 'private' : 'unverified') : 'failed', message: error.message };
+        result = { status: sauceRefusal(error.status), message: error.message };
     }
     sauceBookCache.set(id, result);
     return result;
 }
 
+const SAUCE_BOOKMARK_TIP = 'open the bot on saucepan.ai and press the Bot Bazaar bookmark there';
+
 /** Every readable lorebook attached to a Saucepan character, merged into one V2 character_book. */
 async function sauceBook(id, bookName, attached = null) {
     const warnings = [];
     const entries = [];
-    if (!sauceAccount().token) return { book: null, warnings };
     let books = attached;
+    if (!books && (sauceProxyOk === false || !sauceAccount().token)) {
+        warnings.push(`The lorebooks were not included — to get them, ${SAUCE_BOOKMARK_TIP}.`);
+        return { book: null, warnings };
+    }
     try {
         books ??= await sauceAttachedBooks(id);
     } catch (error) {
-        if (error.code === 'proxy') throw error;
-        warnings.push(`The lorebooks could not be listed: ${error.message}`);
+        warnings.push(sauceProxyOk === false ? `The lorebooks were not included — to get them, ${SAUCE_BOOKMARK_TIP}.` : `The lorebooks could not be listed: ${error.message}`);
         return { book: null, warnings };
     }
     const closed = [];
@@ -1370,11 +1419,15 @@ async function sauceBook(id, bookName, attached = null) {
     for (const b of books) {
         const result = await fetchSauceLorebook(b.id);
         if (result.status === 'ok') result.entries.forEach(entry => entries.push(convertEntry(entry, entries.length)));
-        else if (result.status === 'unverified') failed.push(str(b.name) || 'lorebook');
-        else (result.status === 'private' ? closed : failed).push(str(b.name) || 'lorebook');
+        else if (result.status === 'private') closed.push(str(b.name) || 'lorebook');
+        else failed.push(str(b.name) || 'lorebook');
     }
     if (closed.length) warnings.push(`Saucepan did not send the contents of ${nameList(closed)} (kept private by the creator, or your account can't read it yet), so ${closed.length > 1 ? 'they were' : 'it was'} skipped.`);
-    if (failed.length) warnings.push(sauceAccount().verified ? `Could not download ${nameList(failed)} from Saucepan right now.` : `Saucepan only sends lorebooks to accounts with a verified email, so ${nameList(failed)} could not be imported. Verify your email on saucepan.ai.`);
+    if (failed.length) {
+        if (!sauceAccount().verified) warnings.push(`Saucepan only sends lorebooks to accounts with a verified email, so ${nameList(failed)} could not be imported. Verify your email on saucepan.ai.`);
+        else if (sauceProxyOk === false) warnings.push(`${nameList(failed)} could not be included — to get ${failed.length > 1 ? 'them' : 'it'}, ${SAUCE_BOOKMARK_TIP}.`);
+        else warnings.push(`Could not download ${nameList(failed)} from Saucepan right now.`);
+    }
     if (!entries.length) return { book: null, warnings };
     return { book: { name: bookName, description: `Imported from Saucepan (${id})`, extensions: {}, entries }, warnings };
 }
@@ -1413,8 +1466,12 @@ function buildSauceCard(c, def, book) {
     };
 }
 
-/** @param {object} c companion  @param {object|null} defResult result of fetchSauceDefinition() */
-async function importSauceCharacter(c, defResult = null) {
+/**
+ * @param {object} c companion
+ * @param {object|null} defResult result of fetchSauceDefinition() (or brought by the bookmark)
+ * @param {object[]|null} attached the character's lorebook list, when already known
+ */
+async function importSauceCharacter(c, defResult = null, attached = null) {
     const { Popup } = ctx();
     const name = safeName(c.display_name || c.name) || 'Saucepan character';
     defResult ??= await fetchSauceDefinition(c.id);
@@ -1422,15 +1479,19 @@ async function importSauceCharacter(c, defResult = null) {
     if (!sauceHasDefinition(def)) {
         const why = {
             login: 'Your Saucepan account is not connected, so the definition and lorebooks are not available.',
+            bookmark: `The definition comes with your Saucepan login — to get it, ${SAUCE_BOOKMARK_TIP}. You come straight back here with everything.`,
             unverified: 'Saucepan only sends definitions to accounts with a verified email. Verify your email on saucepan.ai, then try again.',
             hidden: 'The creator keeps this definition hidden, so Saucepan does not send it.',
+            private: 'The creator keeps this definition hidden, so Saucepan does not send it.',
             failed: `Saucepan did not send the definition (${defResult.message || 'unknown error'}).`,
             ok: 'Saucepan sent an empty definition.',
         }[defResult.status];
         const proceed = await Popup.show.confirm('Definition not available', `${why} Import only the public info (name, picture, short description, tags)?`);
         if (!proceed) return false;
     }
-    const { book, warnings } = await sauceBook(c.id, `${name} (Saucepan Lorebook)`);
+    const { book, warnings } = Number(c.lorebook_count) || attached?.length
+        ? await sauceBook(c.id, `${name} (Saucepan Lorebook)`, attached)
+        : { book: null, warnings: [] };
     await finishImport(buildSauceCard(c, def, book), book, sauceImage(c.image?.id, 'public'), name, warnings);
     return true;
 }
@@ -1477,6 +1538,63 @@ const sauceComment = (c) => ({
     replyCount: Array.isArray(c.replies) ? c.replies.length : 0,
     replies: Array.isArray(c.replies) ? c.replies : [],
 });
+
+// ---- what the bookmark brings back from saucepan.ai (it runs there, with the user's own login)
+
+/** A character the bookmark collected on its Saucepan page → what openSauceDetail() needs, no network. */
+function preloadSauceCompanion(p, verified) {
+    const d = p.definition || {};
+    let defResult;
+    if (d.status === 200) {
+        const def = sauceDefinition(d.data);
+        defResult = def ? { status: 'ok', def } : { status: 'hidden' };
+    } else {
+        const reason = sauceRefusal(d.status, verified);
+        defResult = { status: reason === 'private' ? 'hidden' : reason, message: d.message };
+    }
+    const attached = [];
+    for (const b of Array.isArray(p.books) ? p.books : []) {
+        if (!b?.meta?.id) continue;
+        attached.push(b.meta);
+        sauceBookCache.set(b.meta.id, sauceBookResult(b.data, b.status, verified));
+    }
+    sauceSeen.set(p.data.companion.id, sauceModel(p.data.companion));
+    return { companion: p.data.companion, defResult, attached: p.booksStatus === 200 || attached.length ? attached : null };
+}
+
+/**
+ * Applies the Saucepan part of a bookmark handoff: favorites, and the character or lorebook whose page the
+ * bookmark was pressed on. Returns what to show, or null.
+ */
+async function applySauceHandoff(sauce) {
+    const verified = sauce.me ? sauce.me.is_verified !== false : sauceAccount().verified;
+    if (Array.isArray(sauce.favorites)) {
+        await loadFavorites();
+        const { added } = mergeFavorites('saucepan', sauce.favorites.filter(f => f?.id).map(f => ({
+            source: 'saucepan',
+            id: f.id,
+            name: str(f.name),
+            image: sauceImage(f.image),
+            creator: str(f.creator),
+            creatorId: str(f.creatorId),
+            kind: f.kind === 'lorebook' ? 'lorebook' : 'character',
+        })));
+        syncState.saucepan.at = Date.now();
+        settings().sauceFavsAt = Date.now();
+        ctx().saveSettingsDebounced();
+        if (added) toastr.info(`${added} Saucepan favorite${added > 1 ? 's' : ''} added to Favorites.`, 'Bot Bazaar');
+    }
+    if (sauce.companion?.data?.companion?.id) {
+        return { kind: 'character', id: sauce.companion.data.companion.id, preload: preloadSauceCompanion(sauce.companion, verified) };
+    }
+    if (sauce.lorebook?.id) {
+        const meta = sauce.lorebook.data?.lorebook || sauce.lorebook.data;
+        if (meta?.name) sauceSeen.set(sauce.lorebook.id, { ...sauceBookModel({ ...meta, id: sauce.lorebook.id }) });
+        sauceBookCache.set(sauce.lorebook.id, sauceBookResult(sauce.lorebook.data, sauce.lorebook.status, verified));
+        return { kind: 'lorebook', id: sauce.lorebook.id };
+    }
+    return null;
+}
 
 // ---------------------------------------------------------------------------------------------- favorites
 
@@ -1607,7 +1725,8 @@ async function syncSite(site, force = false) {
         return result;
     } catch (error) {
         console.warn(TAG, 'Favorites sync failed', site, error);
-        s.error = error.code === 'auth' ? 'login needed' : (error.code === 'proxy' ? 'proxy off' : 'could not sync');
+        // Without the proxy, Saucepan favorites arrive with the bookmark instead; that's not an error.
+        s.error = error.code === 'auth' ? 'login needed' : (error.code === 'proxy' ? '' : 'could not sync');
         return null;
     } finally {
         s.busy = false;
@@ -1635,7 +1754,11 @@ function syncPill(site) {
     const s = syncState[site];
     let text;
     let cls = '';
-    if (!siteConnected(site)) {
+    if (site === 'saucepan' && sauceProxyOk === false) {
+        const at = settings().sauceFavsAt;
+        text = at ? `<i class="fa-solid fa-bookmark"></i> from the bookmark ${esc(timeAgo(new Date(at).toISOString()))}` : 'press the bookmark on saucepan.ai';
+        cls = at ? 'jai_pill_ok' : 'jai_pill_off';
+    } else if (!siteConnected(site)) {
         text = '<span class="jai_link" data-jai-connect-site>connect to sync</span>';
         cls = 'jai_pill_off';
     } else if (s.busy) {
@@ -2234,6 +2357,8 @@ function buildUi() {
         }
         if (action === 'resume') resume();
         if (action === 'copycode') copyText(buildBookmarklet(), 'Button code copied.');
+        const copy = event.target.closest('[data-copy]');
+        if (copy) copyText(copy.dataset.copy, 'Copied. Paste it in a terminal opened in your SillyTavern folder.');
     });
 }
 
@@ -2386,8 +2511,8 @@ function updateStatus() {
         const sauce = sauceAccount();
         const status = $('#jai_status');
         if (sauceProxyOk === false) {
-            status.className = 'jai_status jai_bad';
-            status.textContent = 'Saucepan · proxy switched off';
+            status.className = 'jai_status jai_ok';
+            status.textContent = `Saucepan · bookmark mode${sauce.user ? ` · @${sauce.user}` : ''}`;
         } else if (sauce.token) {
             status.className = `jai_status ${sauce.verified ? 'jai_ok' : 'jai_bad'}`;
             status.textContent = `Saucepan · connected${sauce.user ? ` as @${sauce.user}` : ''}${sauce.verified ? '' : ' · email not verified'}`;
@@ -2481,7 +2606,7 @@ function showConnect(reason = '') {
             </div>
             <div class="jai_acc">
                 <div class="jai_acc_head"><b>Saucepan</b> ${sauceState}</div>
-                <p class="jai_note">For search, definitions, lorebooks and your Saucepan favorites. Browsing works without it. Connect once; it stays connected.${sauce.token && !sauce.verified ? ' <b>Saucepan only sends definitions to accounts with a verified email</b> — verify yours on saucepan.ai.' : ''}${sauceProxyOk === false ? ' <b>Needs SillyTavern\'s proxy</b> — open the Saucepan tab for the one-time setup.' : ''}</p>
+                <p class="jai_note">For definitions, lorebooks and your Saucepan favorites. Pressed on a bot's Saucepan page, the bookmark also brings that bot here, ready to import — no setup needed.${sauce.token && !sauce.verified ? ' <b>Saucepan only sends definitions to accounts with a verified email</b> — verify yours on saucepan.ai.' : ''}</p>
                 ${steps('Saucepan', 'open-sauce')}
                 ${sauce.token ? '<span class="jai_link" data-jai="disconnect-sauce">Disconnect Saucepan</span>' : ''}
             </div>
@@ -2553,10 +2678,10 @@ async function pasteToken() {
 }
 
 async function saveToken() {
-    const bazaar = $('#jai_token').value.trim().match(/bazaar:([A-Za-z0-9+/=_-]+)/);
+    const bazaar = $('#jai_token').value.trim().match(/bazaar:([A-Za-z0-9+/=_.-]+)/);
     if (bazaar) {
         showMessage('<i class="fa-solid fa-spinner fa-spin"></i> Connecting…');
-        const done = await importLogin(decodeHandoff(bazaar[1]));
+        const done = await importLogin(await decodeHandoff(bazaar[1]));
         return done.length ? showConnect() : showConnect('That was not a valid Bot Bazaar login. Press the bookmark again.');
     }
     const chubKey = extractChubKey($('#jai_token').value);
@@ -2632,6 +2757,11 @@ function showError(error) {
 }
 
 function setView(view) {
+    // A page replaces the list: drop any list still loading, so its answer can't cover the page.
+    if (view === 'detail') {
+        listRequest++;
+        state.loading = false;
+    }
     $('#jai_grid').style.display = view === 'grid' ? '' : 'none';
     $('#jai_creator').style.display = view === 'grid' && state.creator ? '' : 'none';
     $('#jai_filters').style.display = view === 'grid' ? '' : 'none';
@@ -2874,6 +3004,8 @@ const STATUS_LABEL = {
     failed: ['jai_bad', 'fa-triangle-exclamation', 'Could not be checked'],
     code: ['jai_dim', 'fa-code', 'Code — not supported'],
     unverified: ['jai_bad', 'fa-envelope', 'Needs a verified Saucepan email'],
+    bookmark: ['jai_dim', 'fa-bookmark', 'Comes with the bookmark'],
+    login: ['jai_bad', 'fa-key', 'Needs your Saucepan login'],
 };
 
 /**
@@ -3513,19 +3645,48 @@ function renderSauceCard(m) {
 }
 
 /** Shown when SillyTavern's proxy is off: the one-time setup Saucepan needs. */
+const PROXY_COMMANDS = [
+    ['Windows (PowerShell, in the SillyTavern folder)', '(Get-Content config.yaml) -replace \'enableCorsProxy: false\',\'enableCorsProxy: true\' | Set-Content config.yaml'],
+    ['Android (Termux)', 'cd ~/SillyTavern && sed -i \'s/enableCorsProxy: false/enableCorsProxy: true/\' config.yaml'],
+    ['Linux', 'sed -i \'s/enableCorsProxy: false/enableCorsProxy: true/\' config.yaml'],
+    ['Mac', 'sed -i \'\' \'s/enableCorsProxy: false/enableCorsProxy: true/\' config.yaml'],
+];
+
+/**
+ * The Saucepan tab when SillyTavern's proxy is off: everything works through the bookmark, pressed on the bot's
+ * own Saucepan page. Browsing right here is the optional extra.
+ */
 function showSauceSetup() {
     hideViews();
+    const sauce = sauceAccount();
     showMessage(`
-        <h3><i class="fa-solid fa-plug"></i> One-time setup for Saucepan</h3>
-        <p>Saucepan only answers its own website, so Bot Bazaar talks to it through SillyTavern's built-in proxy. That proxy is switched off right now.</p>
-        <ol class="jai_steps">
-            <li>Open <b>config.yaml</b> in your SillyTavern folder (the same folder as <i>Start.bat</i> / <i>start.sh</i>).</li>
-            <li>Find <code>enableCorsProxy: false</code> and change it to <code>enableCorsProxy: true</code>, then save.</li>
-            <li>Restart SillyTavern and reload this page.</li>
-        </ol>
-        <p class="jai_note">Only needed once, and it then works on every device that uses this SillyTavern, phones included. JanitorAI, Chub, Favorites and the Library work without it.</p>
-        ${actions(button('retry', 'fa-rotate', 'Try again'), `<div class="jai_btn" data-source-switch="chub"><i class="fa-solid fa-arrow-left"></i><span>Browse Chub instead</span></div>`)}`);
-    $('#jai_message').querySelector('[data-source-switch]')?.addEventListener('click', () => switchSource('chub'));
+        <div class="jai_shome">
+            <h3><i class="fa-solid fa-bowl-food"></i> Saucepan — no setup needed</h3>
+            <p>Saucepan only talks to its own website, so the <b>Bot Bazaar bookmark</b> does the work there, with your Saucepan login:</p>
+            <ol class="jai_steps jai_sauce_steps">
+                <li>${button('open-sauce', 'fa-up-right-from-square', 'Open Saucepan')} <span>find a bot you like (signed in).</span></li>
+                <li>On the bot's page, press the <b>Bot Bazaar</b> bookmark.</li>
+                <li>You land back here on that bot — tap <b>Import</b>. Its definition, greetings and lorebooks come along.</li>
+            </ol>
+            <p class="jai_note">Every press also brings your Saucepan favorites into <b>Favorites</b>${settings().sauceFavsAt ? ` (last time ${esc(timeAgo(new Date(settings().sauceFavsAt).toISOString()))})` : ''}. You can also paste a Saucepan link in the search box above to see a bot's page and comments here.${sauce.token ? '' : ' Pressing it the first time also connects your account.'}</p>
+            <details class="jai_bm" ${settings().bookmarkSeen ? '' : 'open'}>
+                <summary>Don't have the bookmark yet?</summary>
+                <ul>
+                    <li><b>Computer:</b> press <b>Ctrl+Shift+B</b> to show the bookmarks bar, then drag this onto it: <a class="jai_bookmarklet" href="${esc(buildBookmarklet())}" title="Drag me to the bookmarks bar">Bot Bazaar</a></li>
+                    <li><b>Phone:</b> ${button('copycode', 'fa-copy', 'Copy bookmark code')} then bookmark any page, edit that bookmark, paste the code as its address and name it <b>bazaar</b>. On Saucepan, type <b>bazaar</b> in the address bar and tap the bookmark.</li>
+                </ul>
+                <p class="jai_note">Added it before? Replace it with this one — older copies only connect your login.</p>
+            </details>
+            <details>
+                <summary>Optional: browse and search Saucepan right here too</summary>
+                <p>That needs SillyTavern's built-in proxy switched on once. Run one line in your SillyTavern folder, then restart SillyTavern:</p>
+                <div class="jai_cmds">${PROXY_COMMANDS.map(([label, cmd]) => `
+                    <div class="jai_cmd"><span>${esc(label)}</span><code>${esc(cmd)}</code><span class="jai_btn jai_small" data-copy="${esc(cmd)}"><i class="fa-solid fa-copy"></i><span>Copy</span></span></div>`).join('')}
+                </div>
+                <p class="jai_note">Or open <b>config.yaml</b> and change <code>enableCorsProxy: false</code> to <code>enableCorsProxy: true</code>.</p>
+                ${actions(button('retry', 'fa-rotate', 'I switched it on — try again'))}
+            </details>
+        </div>`);
 }
 
 function sauceStatusFact(result, open) {
@@ -3533,14 +3694,19 @@ function sauceStatusFact(result, open) {
         case 'ok': return sauceHasDefinition(result.def) ? ['jai_ok', 'fa-check', 'Definition available'] : ['jai_bad', 'fa-lock', 'Saucepan sent no definition'];
         case 'login': return ['jai_bad', 'fa-key', 'Definition needs your Saucepan login'];
         case 'unverified': return ['jai_bad', 'fa-envelope', 'Verify your email on Saucepan to get definitions'];
+        case 'bookmark': return ['jai_dim', 'fa-bookmark', 'For the definition and lorebooks, press the Bot Bazaar bookmark on this bot\'s Saucepan page'];
         case 'hidden': return ['jai_bad', 'fa-lock', open === false ? 'Definition hidden by the creator' : 'Saucepan did not send the definition'];
         case 'failed': return ['jai_bad', 'fa-triangle-exclamation', `Definition could not be loaded: ${result.message || ''}`];
         default: return ['jai_dim', 'fa-spinner fa-spin', 'Checking the definition…'];
     }
 }
 
-/** Character page for Saucepan. */
-async function openSauceDetail(id) {
+/**
+ * Character page for Saucepan.
+ * @param {string} id
+ * @param {{companion: object, defResult: object, attached: object[]|null}|null} [preload] what the bookmark brought
+ */
+async function openSauceDetail(id, preload = null) {
     const seen = sauceSeen.get(id);
     if (seen?.kind === 'lorebook') return openSauceLorebook(id);
     setView('detail');
@@ -3552,21 +3718,24 @@ async function openSauceDetail(id) {
     box.style.removeProperty('--jai-backdrop');
     showMessage('<i class="fa-solid fa-spinner fa-spin"></i> Loading character…');
 
-    let c;
-    try {
-        const result = await sauceFetch(`/api/v2/companions/${encodeURIComponent(id)}`);
-        c = result?.companion;
-        if (!c) throw new ApiError('http', 'Saucepan did not return this character.');
-    } catch (error) {
-        // A favorite saved as a character may really be a lorebook.
-        if (error.status === 404 && !seen) return openSauceLorebook(id);
-        return showError(error);
+    let c = preload?.companion;
+    if (!c) {
+        try {
+            const result = await sauceFetch(`/api/v2/companions/${encodeURIComponent(id)}`);
+            c = result?.companion;
+            if (!c) throw new ApiError('http', 'Saucepan did not return this character.');
+        } catch (error) {
+            // A favorite saved as a character may really be a lorebook.
+            if ((error.status === 404 || sauceProxyOk === false) && !seen) return openSauceLorebook(id);
+            return showError(error);
+        }
     }
     if (state.detail !== id) return;
     showMessage('');
 
     const m = sauceModel(c);
-    const connected = !!sauceAccount().token;
+    // "connected" here means: Bot Bazaar can ask Saucepan with the login itself (needs the proxy).
+    const connected = !!sauceAccount().token && sauceProxyOk !== false;
     const posted = sauceDate(c.posted_at);
     const updated = sauceDate(c.updated_at);
     const tokenParts = [
@@ -3576,7 +3745,10 @@ async function openSauceDetail(id) {
         ['Formatting', c.formatting_instructions_token_count],
     ].filter(([, n]) => Number(n) > 0);
     const tokens = tokenParts.reduce((sum, [, n]) => sum + Number(n), 0);
-    const [factCls, factIcon, factText] = sauceStatusFact(connected ? null : { status: 'login' }, c.open_definition);
+    // Bookmark data is complete already; otherwise ask Saucepan (with the login, through the proxy) or explain how.
+    const noLogin = { status: sauceProxyOk === false ? 'bookmark' : 'login' };
+    const [factCls, factIcon, factText] = sauceStatusFact(preload ? preload.defResult : (connected ? null : noLogin), c.open_definition);
+    const canBooks = !!preload?.attached || connected;
     const bigImage = sauceImage(c.image?.id, 'public');
     if (bigImage) box.style.setProperty('--jai-backdrop', `url("${bigImage}")`);
 
@@ -3613,9 +3785,12 @@ async function openSauceDetail(id) {
                 </div>
                 <div class="jai_facts">
                     <span class="jai_deffact ${factCls}"><i class="fa-solid ${factIcon}"></i> ${esc(factText)}</span>
-                    <span class="jai_bookfact ${m.books ? '' : 'jai_dim'}"><i class="fa-solid fa-book-atlas"></i> ${m.books ? (connected ? '<i class="fa-solid fa-spinner fa-spin"></i> Checking lorebooks…' : 'Lorebooks need your Saucepan login') : 'No lorebook attached'}</span>
+                    <span class="jai_bookfact ${m.books ? '' : 'jai_dim'}"><i class="fa-solid fa-book-atlas"></i> ${m.books ? (canBooks ? '<i class="fa-solid fa-spinner fa-spin"></i> Checking lorebooks…' : (sauceProxyOk === false ? 'Lorebooks come with the bookmark' : 'Lorebooks need your Saucepan login')) : 'No lorebook attached'}</span>
                     ${c.open_definition ? '<span class="jai_ok" title="The creator shares the definition"><i class="fa-solid fa-lock-open"></i> Open definition</span>' : ''}
-                    ${connected ? '' : '<span class="jai_link" data-jai-connect><i class="fa-solid fa-key"></i> Connect Saucepan</span>'}
+                    ${connected || preload ? '' : (sauceProxyOk === false
+        ? `<a class="jai_link" href="${esc(saucePage(c.id))}" target="_blank" rel="noopener"><i class="fa-solid fa-bookmark"></i> Open on Saucepan, then press the bookmark</a>`
+        : '<span class="jai_link" data-jai-connect><i class="fa-solid fa-key"></i> Connect Saucepan</span>')}
+                    ${preload ? '<span class="jai_ok"><i class="fa-solid fa-bookmark"></i> Brought by the bookmark</span>' : ''}
                 </div>
             </div>
         </div>
@@ -3629,9 +3804,10 @@ async function openSauceDetail(id) {
     wireComments(box, 'saucepan', c.id);
 
     // With a login: the definition and the attached lorebooks, checked before promising anything.
-    let defResult = connected ? null : { status: 'login' };
-    let attached = null;
-    const defReady = connected ? fetchSauceDefinition(c.id).then((result) => {
+    let defResult = preload ? preload.defResult : (connected ? null : noLogin);
+    let attached = preload?.attached || null;
+    const defSource = preload ? Promise.resolve(preload.defResult) : (connected ? fetchSauceDefinition(c.id) : null);
+    const defReady = defSource ? defSource.then((result) => {
         defResult = result;
         if (state.detail !== id) return;
         const [cls, icon, text] = sauceStatusFact(result, c.open_definition);
@@ -3651,10 +3827,10 @@ async function openSauceDetail(id) {
         }
     }).catch(error => showError(error)) : Promise.resolve();
 
-    if (connected && m.books) {
+    if (canBooks && (m.books || attached?.length)) {
         (async () => {
             try {
-                attached = await sauceAttachedBooks(c.id);
+                attached ??= await sauceAttachedBooks(c.id);
             } catch (error) {
                 const fact = box.querySelector('.jai_bookfact');
                 if (fact) { fact.className = 'jai_bookfact jai_bad'; fact.innerHTML = `<i class="fa-solid fa-book-atlas"></i> ${esc(error.message)}`; }
@@ -3685,7 +3861,9 @@ async function openSauceDetail(id) {
             const fact = box.querySelector('.jai_bookfact');
             if (!fact) return;
             const closed = attached.length - ok.length;
-            const fallback = sauceAccount().verified ? 'Saucepan did not send the lorebook contents' : 'Lorebooks need a verified Saucepan email';
+            const statuses = [...results.values()].map(r => r.status);
+            const fallback = statuses.includes('unverified') ? 'Lorebooks need a verified Saucepan email'
+                : (statuses.includes('bookmark') ? 'Lorebooks come with the bookmark' : 'Saucepan did not send the lorebook contents');
             let text = ok.length ? `${ok.length} lorebook${ok.length > 1 ? 's' : ''} (${total} entries) will be imported` : fallback;
             if (ok.length && closed) text += ` · ${closed} not readable`;
             fact.className = `jai_bookfact ${ok.length ? 'jai_ok' : 'jai_bad'}`;
@@ -3711,7 +3889,7 @@ async function openSauceDetail(id) {
     });
     run(box.querySelector('.jai_import'), 'Import to SillyTavern', async () => {
         await defReady;
-        if (await importSauceCharacter(c, defResult)) closeBrowser();
+        if (await importSauceCharacter(c, defResult, attached)) closeBrowser();
     });
     run(box.querySelector('.jai_book_only'), 'Lorebook only', async () => {
         const name = safeName(m.name) || 'Saucepan character';
@@ -3735,7 +3913,10 @@ async function openSauceLorebook(id) {
     box.style.removeProperty('--jai-backdrop');
     const fav = favorites?.find(f => f.key === favKey('saucepan', id));
     const m = sauceSeen.get(id) || { id, kind: 'lorebook', name: fav?.name || 'Lorebook', image: fav?.image || '', creatorName: fav?.creator || '', creatorId: fav?.creatorId || '', blurb: '', tags: [] };
-    const connected = !!sauceAccount().token;
+    // Contents can be read when the bookmark brought them (cached) or with the login through the proxy.
+    const cached = sauceBookCache.has(id);
+    const connected = cached || (!!sauceAccount().token && sauceProxyOk !== false);
+    const missing = sauceProxyOk === false ? 'Press the Bot Bazaar bookmark on this lorebook\'s Saucepan page to bring its contents' : 'The contents need your Saucepan login';
     showMessage('');
     box.innerHTML = `
         <div class="jai_sdetail">
@@ -3760,8 +3941,8 @@ async function openSauceLorebook(id) {
                     <div class="jai_btn jai_back"><i class="fa-solid fa-arrow-left"></i><span>Back</span></div>
                 </div>
                 <div class="jai_facts">
-                    <span class="jai_bookfact ${connected ? 'jai_dim' : 'jai_bad'}"><i class="fa-solid ${connected ? 'fa-spinner fa-spin' : 'fa-key'}"></i> ${connected ? 'Checking the contents…' : 'The contents need your Saucepan login'}</span>
-                    ${connected ? '' : '<span class="jai_link" data-jai-connect><i class="fa-solid fa-key"></i> Connect Saucepan</span>'}
+                    <span class="jai_bookfact ${connected ? 'jai_dim' : 'jai_bad'}"><i class="fa-solid ${connected ? 'fa-spinner fa-spin' : 'fa-key'}"></i> ${connected ? 'Checking the contents…' : esc(missing)}</span>
+                    ${connected || sauceProxyOk === false ? '' : '<span class="jai_link" data-jai-connect><i class="fa-solid fa-key"></i> Connect Saucepan</span>'}
                 </div>
             </div>
         </div>
@@ -3778,11 +3959,11 @@ async function openSauceLorebook(id) {
         fact.className = `jai_bookfact ${result.status === 'ok' ? 'jai_ok' : 'jai_bad'}`;
         fact.innerHTML = result.status === 'ok'
             ? `<i class="fa-solid fa-check"></i> ${result.entries.length} entries will be imported`
-            : `<i class="fa-solid fa-lock"></i> ${esc(sauceAccount().verified ? 'Saucepan did not send the contents (kept private by the creator)' : 'Verify your email on Saucepan to read lorebooks')}`;
+            : `<i class="fa-solid fa-lock"></i> ${esc({ unverified: 'Verify your email on Saucepan to read lorebooks', bookmark: missing }[result.status] || 'Saucepan did not send the contents (kept private by the creator)')}`;
     }
     const importButton = box.querySelector('.jai_import');
     importButton.addEventListener('click', async () => {
-        if (result?.status !== 'ok') return toastr.warning(connected ? 'Saucepan did not send this lorebook\'s contents.' : 'Connect your Saucepan account first.', 'Bot Bazaar');
+        if (result?.status !== 'ok') return toastr.warning(connected ? 'Saucepan did not send this lorebook\'s contents.' : `${missing}.`, 'Bot Bazaar');
         const name = safeName(m.name) || 'Saucepan lorebook';
         const book = { name, description: `Imported from Saucepan (${id})`, extensions: {}, entries: result.entries.map((e, i) => convertEntry(e, i)) };
         const { saveWorldInfo, convertCharacterBook, updateWorldInfoList } = ctx();
@@ -3821,10 +4002,67 @@ async function botBazaarBookmark(ST) {
     const SAUCEPAN = /(^|\.)saucepan\.ai$/.test(location.hostname);
     if (!CHUB && !JANITOR && !SAUCEPAN) { alert('Open janitorai.com, chub.ai or saucepan.ai (signed in) first, then press this.'); return; }
     let payload;
+    let note = null;
     if (SAUCEPAN) {
+        // Saucepan only answers its own website, so the work happens here, with this tab's own login: the
+        // account, the bot (or lorebook) whose page this is, and the favorites. SillyTavern needs no setup for it.
         const key = localStorage.getItem('hallucination/auth_token') || '';
         if (!key) { alert('No Saucepan login found here. Sign in to saucepan.ai first.'); return; }
-        payload = { v: 1, saucepan: key };
+        note = document.createElement('div');
+        note.style.cssText = 'position:fixed;z-index:2147483647;left:50%;top:16px;transform:translateX(-50%);background:#ff6a3d;color:#fff;padding:10px 18px;border-radius:999px;font:600 14px sans-serif;box-shadow:0 6px 20px rgba(0,0,0,.4)';
+        note.textContent = 'Bot Bazaar: connecting…';
+        document.body.appendChild(note);
+        const H = { Authorization: 'Bearer ' + key, 'cf-edge-token-8af3': 'e3b0c44298fc1c14' };
+        const call = async (path, body) => {
+            try {
+                const r = await fetch(path, body ? { method: 'POST', headers: Object.assign({ 'Content-Type': 'application/json' }, H), body: JSON.stringify(body) } : { headers: H });
+                const d = await r.json().catch(() => null);
+                return { status: r.status, data: d };
+            } catch (e) { return { status: 0, data: null }; }
+        };
+        const sauce = {};
+        const me = await call('/api/v1/users/me');
+        const u = me.data && (me.data.user || me.data);
+        if (u && u.id) sauce.me = { id: u.id, handle: u.handle, is_verified: u.is_verified };
+        const page = location.pathname.match(/\/(companion|lorebook)\/([0-9a-f-]{36})/i);
+        if (page && page[1].toLowerCase() === 'companion') {
+            note.textContent = 'Bot Bazaar: getting this character…';
+            const id = page[2];
+            const c = await call('/api/v2/companions/' + id);
+            // The page description comes scrambled; Bot Bazaar doesn't use it, so leave it out.
+            if (c.data && c.data.companion) { delete c.data.companion.full_description_fragments; delete c.data.companion.starting_scenarios_fragments; }
+            const d = await call('/api/v1/companion/definition?companion_id=' + id);
+            const l = await call('/api/v2/companions/' + id + '/lorebooks');
+            const books = [];
+            for (const b of (l.data && l.data.lorebooks) || []) {
+                const r = await call('/api/v1/lorebooks/' + b.id);
+                books.push({ meta: b, status: r.status, data: r.status === 200 ? r.data : null });
+            }
+            sauce.companion = { data: c.data, definition: { status: d.status, data: d.status === 200 ? d.data : null, message: d.data && d.data.error ? d.data.error.message : '' }, books: books, booksStatus: l.status };
+        } else if (page) {
+            note.textContent = 'Bot Bazaar: getting this lorebook…';
+            const r = await call('/api/v1/lorebooks/' + page[2]);
+            sauce.lorebook = { id: page[2], status: r.status, data: r.status === 200 ? r.data : null };
+        }
+        if (sauce.me) {
+            note.textContent = 'Bot Bazaar: getting your favorites…';
+            const favs = [];
+            let ok = true;
+            const pages = [['/api/v1/search', 'companions', 'character', { special_view: { view: 'favorites' } }], ['/api/v1/search/favorited-lorebooks', 'lorebooks', 'lorebook', {}]];
+            for (const [path, field, kind, extra] of pages) {
+                for (let o = 0; o < 960; o += 24) {
+                    const r = await call(path, Object.assign({ order_by: 'favorited_at', asc: false, offset: o, limit: 24, sus: true }, extra));
+                    const list = r.data && r.data[field];
+                    if (r.status !== 200 || !Array.isArray(list)) { if (kind === 'character') ok = false; break; }
+                    list.forEach(x => favs.push({ id: x.id, kind: kind, name: x.display_name || x.name, image: kind === 'character' ? (x.image && x.image.id) : x.image_id, creator: x.author_handle || x.owner_handle, creatorId: x.author_id || x.owner_id }));
+                    if (list.length < 24) break;
+                }
+            }
+            // Only a complete list may replace the old one (otherwise favorites would vanish).
+            if (ok) sauce.favorites = favs;
+        }
+        note.textContent = 'Bot Bazaar: opening SillyTavern…';
+        payload = { v: 1, saucepan: key, sauce: sauce };
     } else if (CHUB) {
         let key = localStorage.getItem('URQL_TOKEN') || '';
         try { const parsed = JSON.parse(key); if (typeof parsed === 'string') key = parsed; } catch (e) { /* already plain */ }
@@ -3855,8 +4093,19 @@ async function botBazaarBookmark(ST) {
         } catch (e) { /* no renewal key; the login still works until it expires */ }
         payload = { v: 1, janitor: { access_token: session.access_token, refresh_token: session.refresh_token, expires_at: session.expires_at, apikey } };
     }
-    const data = btoa(unescape(encodeURIComponent(JSON.stringify(payload))));
+    const json = JSON.stringify(payload);
+    let data;
+    if (window.CompressionStream) {
+        // Characters with lorebooks can be large; gzip keeps the address short ("z." marks it).
+        const buf = new Uint8Array(await new Response(new Blob([json]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer());
+        let bin = '';
+        for (let i = 0; i < buf.length; i += 32768) bin += String.fromCharCode.apply(null, buf.subarray(i, i + 32768));
+        data = 'z.' + btoa(bin);
+    } else {
+        data = btoa(unescape(encodeURIComponent(json)));
+    }
     if (ST) { location.replace(ST + '/#botbazaar=' + encodeURIComponent(data)); return; }
+    if (note) note.remove();
     const out = 'bazaar:' + data;
     if (navigator.clipboard) { navigator.clipboard.writeText(out).then(() => alert('Login copied. Paste it into Bot Bazaar.'), () => prompt('Copy this, then paste into Bot Bazaar:', out)); }
     else { prompt('Copy this, then paste into Bot Bazaar:', out); }
@@ -3864,9 +4113,22 @@ async function botBazaarBookmark(ST) {
 
 const buildBookmarklet = () => `javascript:(${botBazaarBookmark.toString()})(${JSON.stringify(location.origin)});void 0`;
 
-const decodeHandoff = (data) => {
-    try { return JSON.parse(decodeURIComponent(escape(atob(decodeURIComponent(data))))); } catch { return null; }
-};
+/** Reads what the bookmark handed over: base64 JSON, or "z." + base64 gzip for bigger payloads. */
+async function decodeHandoff(data) {
+    try {
+        let text = str(data);
+        try { text = decodeURIComponent(text); } catch { /* already decoded */ }
+        if (text.startsWith('z.')) {
+            const bytes = Uint8Array.from(atob(text.slice(2)), ch => ch.charCodeAt(0));
+            const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
+            return JSON.parse(await new Response(stream).text());
+        }
+        return JSON.parse(decodeURIComponent(escape(atob(text))));
+    } catch (error) {
+        console.warn(TAG, 'Could not read the bookmark handoff', error);
+        return null;
+    }
+}
 
 /** Applies a captured login. Returns the sites it connected. */
 async function importLogin(payload, { open = false } = {}) {
@@ -3897,34 +4159,49 @@ async function importLogin(payload, { open = false } = {}) {
             toastr.error('Chub did not accept that login. Sign in on chub.ai and press the bookmark again.', 'Bot Bazaar');
         }
     }
+    const sauce = payload.sauce && typeof payload.sauce === 'object' ? payload.sauce : null;
     if (typeof payload.saucepan === 'string' && payload.saucepan) {
-        try {
-            const user = await verifySauceToken(payload.saucepan);
-            if (user) {
-                storeSauceToken(payload.saucepan, user);
-                syncState.saucepan.at = 0;
-                connected.push('Saucepan');
-                if (user.is_verified === false) toastr.warning('Your Saucepan email is not verified yet. Saucepan only sends definitions and lorebooks to verified accounts — verify it on saucepan.ai.', 'Bot Bazaar', { timeOut: 15000 });
-            } else {
-                toastr.error('Saucepan did not accept that login. Sign in on saucepan.ai and press the bookmark again.', 'Bot Bazaar');
-            }
-        } catch (error) {
-            if (error.code === 'proxy') {
-                // Keep it: it will work as soon as the proxy is switched on.
-                storeSauceToken(payload.saucepan);
-                connected.push('Saucepan');
-                toastr.warning('Saucepan login saved, but SillyTavern\'s proxy is off. Open the Saucepan tab in Bot Bazaar for the one-time setup.', 'Bot Bazaar', { timeOut: 15000 });
-            } else {
-                toastr.error(`Saucepan login could not be checked: ${error.message}`, 'Bot Bazaar');
-            }
+        // The new bookmark already asked Saucepan who this is; older ones need a check (only possible via the proxy).
+        let user = sauce?.me?.id ? sauce.me : null;
+        let checked = !!user;
+        if (!user) {
+            try {
+                user = await verifySauceToken(payload.saucepan);
+                checked = true;
+            } catch { /* proxy off: keep the login unchecked */ }
+        }
+        if (checked && !user) {
+            toastr.error('Saucepan did not accept that login. Sign in on saucepan.ai and press the bookmark again.', 'Bot Bazaar');
+        } else {
+            const known = sauceAccount();
+            const isNew = !known.token || known.token !== payload.saucepan || (user?.id && known.userId !== user.id);
+            storeSauceToken(payload.saucepan, user || {});
+            syncState.saucepan.at = 0;
+            if (isNew) connected.push('Saucepan');
+            if (user?.is_verified === false && isNew) toastr.warning('Your Saucepan email is not verified yet. Saucepan only sends definitions and lorebooks to verified accounts — verify it on saucepan.ai.', 'Bot Bazaar', { timeOut: 15000 });
         }
     }
-    if (connected.length) {
-        toastr.success(`${connected.join(' and ')} connected.`, 'Bot Bazaar');
+    const target = sauce ? await applySauceHandoff(sauce) : null;
+    if (connected.length) toastr.success(`${connected.join(' and ')} connected.`, 'Bot Bazaar');
+    if (target) {
+        // Pressed on a bot's (or lorebook's) Saucepan page: show it, ready to import.
+        state.source = 'saucepan';
+        state.kind = target.kind === 'lorebook' ? 'lorebooks' : 'characters';
+        state.sort = DEFAULT_SORT.saucepan;
+        state.detail = target.id;
+        try { localStorage.setItem(SOURCE_KEY, 'saucepan'); } catch { /* storage unavailable */ }
+        await openBrowser();
+        if (target.kind === 'lorebook') openSauceLorebook(target.id);
+        else openSauceDetail(target.id, target.preload);
+    } else if (connected.length || sauce) {
         if (open && !root?.classList.contains('jai_open')) openBrowser();
-        else if (root?.classList.contains('jai_open')) { updateStatus(); if (awaitingLogin) showConnect(); }
+        else if (root?.classList.contains('jai_open')) {
+            updateStatus();
+            if (awaitingLogin) showConnect();
+            else if (state.source === 'favorites') loadList();
+        }
     }
-    return connected;
+    return connected.length || !sauce ? connected : ['Saucepan'];
 }
 
 /** On load, pick up a login the bookmark handed over through the URL fragment, then clear it from the URL. */
@@ -3932,8 +4209,7 @@ function handleHandoff() {
     const match = location.hash.match(/botbazaar=([^&]*)/);
     if (!match) return;
     try { history.replaceState(null, '', location.pathname + location.search); } catch { /* ignore */ }
-    const payload = decodeHandoff(match[1]);
-    if (payload) importLogin(payload, { open: true });
+    decodeHandoff(match[1]).then(payload => payload && importLogin(payload, { open: true }));
 }
 
 function addButtons() {

@@ -2663,3 +2663,61 @@
         order: 0;
     }
 }
+
+/* ---------- Saucepan without the proxy: the bookmark home page ---------- */
+
+#jai_browser .jai_shome {
+    max-width: 760px;
+    margin: 0 auto;
+    padding: 18px 20px;
+    border: 1px solid #47302a;
+    border-radius: 20px;
+    background: rgba(36, 25, 22, 0.85);
+    text-align: left;
+}
+
+#jai_browser .jai_shome h3 {
+    margin-top: 0;
+    font-family: var(--jai-title-font);
+    color: #ffb193;
+}
+
+#jai_browser .jai_sauce_steps li {
+    margin: 8px 0;
+}
+
+#jai_browser .jai_sauce_steps .jai_btn {
+    display: inline-flex;
+    margin-right: 6px;
+    vertical-align: middle;
+}
+
+#jai_browser .jai_cmds {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin: 8px 0;
+}
+
+#jai_browser .jai_cmd {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 4px 8px;
+    align-items: center;
+}
+
+#jai_browser .jai_cmd > span:first-child {
+    grid-column: 1 / -1;
+    font-size: 12px;
+    color: var(--jai-dim);
+}
+
+#jai_browser .jai_cmd code {
+    display: block;
+    padding: 6px 10px;
+    border-radius: 8px;
+    background: rgba(0, 0, 0, 0.35);
+    font-size: 12px;
+    white-space: nowrap;
+    overflow-x: auto;
+}
