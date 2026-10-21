@@ -2280,6 +2280,10 @@ function buildUi() {
                 <select id="jai_tag"><option value="">Any tag</option></select>
             </div>
             <div class="jai_body">
+                <div id="jai_backbar" class="jai_backbar" style="display:none">
+                    <button type="button" id="jai_backbtn" class="jai_backbtn" title="Back (Esc)"><i class="fa-solid fa-arrow-left" aria-hidden="true"></i><span id="jai_backlabel">Back to results</span></button>
+                    <span id="jai_backwhere" class="jai_backwhere" aria-hidden="true"></span>
+                </div>
                 <div id="jai_filters" class="jai_filters"></div>
                 <div id="jai_message" class="jai_message"></div>
                 <div id="jai_creator" class="jai_creator"></div>
@@ -2296,6 +2300,9 @@ function buildUi() {
 
     root.addEventListener('mousedown', (event) => event.target === root && closeBrowser());
     $('#jai_close').addEventListener('click', closeBrowser);
+    $('#jai_backbtn').addEventListener('click', goBack);
+    new MutationObserver((records) => { if (records.some(r => !lightbox?.contains(r.target))) decorate(); }).observe(root, { childList: true, subtree: true });
+    decorate();
     $('#jai_account').addEventListener('click', () => showConnect());
     $('#jai_search').addEventListener('keydown', (event) => event.key === 'Enter' && submitSearch());
     $('#jai_tag').addEventListener('change', () => { state.tag = $('#jai_tag').value; state.page = 1; loadList(); });
@@ -2336,6 +2343,11 @@ function buildUi() {
     // Cards, creator names and tags are all clickable wherever they appear.
     root.querySelector('.jai_body').addEventListener('click', (event) => {
         if (event.target.closest('#jai_message')) return;
+        const zoomImg = event.target.closest('.jai_zoomable');
+        if (zoomImg) {
+            event.stopPropagation();
+            return openLightbox(zoomImg.currentSrc || zoomImg.src, zoomImg.dataset.full, zoomImg.closest('#jai_detail')?.querySelector('.jai_detail_title')?.textContent.trim() || '');
+        }
         const fav = event.target.closest('[data-fav]');
         if (fav) {
             event.stopPropagation();
@@ -2435,7 +2447,10 @@ function buildUi() {
 
 const openSite = () => window.open(SITE, 'jai_site');
 const hasNext = () => state.size > 0 && state.page * state.size < state.total;
-const openItem = (source, id) => ({ chub: openChubDetail, saucepan: openSauceDetail }[source] || openDetail)(id);
+const openItem = (source, id) => {
+    state.returnId = id;
+    return ({ chub: openChubDetail, saucepan: openSauceDetail }[source] || openDetail)(id);
+};
 
 function resetFilters() {
     state.page = 1;
@@ -2827,14 +2842,349 @@ function showError(error) {
     }
 }
 
+// ---------------------------------------------------------------------------------------------- going back, picture viewer
+
+/* The browser's own history carries one entry per open page (and per open picture), so a phone's back button or
+   swipe goes back inside Bot Bazaar instead of leaving SillyTavern. */
+const hist = { depth: 0 };
+
+function pushHist() {
+    try {
+        history.pushState({ jaiBazaar: 1 }, '');
+        hist.depth++;
+    } catch { /* history unavailable: the on-screen buttons still work */ }
+}
+
+/** Drops our history entries without reacting to them (the page was left some other way). */
+function dropHist() {
+    if (hist.depth <= 0) return;
+    const n = hist.depth;
+    hist.depth = 0;
+    try { history.go(-n); } catch { /* ignore */ }
+}
+
+window.addEventListener('popstate', () => {
+    if (hist.depth <= 0) return;
+    hist.depth--;
+    if (lightbox) hideLightbox();
+    else if (state.detail && root?.classList.contains('jai_open')) doBack();
+});
+
+/** Back from a page to the list, exactly where it was left (same scroll position, same page of results). */
+function doBack() {
+    const body = root.querySelector('.jai_body');
+    const scroll = state.listScroll || 0;
+    const returnId = state.returnId;
+    if ($('#jai_grid').children.length) {
+        setView('grid');
+        showMessage('');
+        const restore = () => { body.scrollTop = scroll; };
+        restore();
+        requestAnimationFrame(() => {
+            restore();
+            const card = returnId && [...$('#jai_grid').querySelectorAll('[data-id]')].find(el => el.dataset.id === String(returnId));
+            card?.focus({ preventScroll: true });
+        });
+    } else {
+        loadList();
+    }
+}
+
+/** The Back button / key: through history when a page entry exists (so the phone's back button stays in sync). */
+function goBack() {
+    if (lightbox) return closeLightbox();
+    if (hist.depth > 0) history.back();
+    else doBack();
+}
+
+function updateBackBar() {
+    const bar = $('#jai_backbar');
+    if (!bar) return;
+    const label = state.source === 'favorites' ? 'Back to Favorites'
+        : (state.source === 'library' ? 'Back to Library'
+            : (state.creator?.name ? `Back to @${state.creator.name}` : 'Back to results'));
+    const set = (el, text) => { if (el.textContent !== text) el.textContent = text; };
+    set($('#jai_backlabel'), label);
+    $('#jai_backbtn').setAttribute('aria-label', `${label} (Esc)`);
+    set($('#jai_backwhere'), $('#jai_detail .jai_detail_title')?.textContent.trim() || '');
+}
+
+// ---- picture viewer: click a picture to open it; zoom with + / − / the wheel / pinch, move by dragging
+
+const zoom = { s: 1, x: 0, y: 0, w: 0, h: 0, sw: 0, sh: 0 };
+let lightbox = null;
+let lightboxReturnFocus = null;
+
+function openLightbox(thumb, full, alt = '') {
+    if (!root || lightbox || !thumb) return;
+    lightboxReturnFocus = document.activeElement;
+    lightbox = document.createElement('div');
+    lightbox.id = 'jai_lightbox';
+    lightbox.setAttribute('role', 'dialog');
+    lightbox.setAttribute('aria-modal', 'true');
+    lightbox.setAttribute('aria-label', 'Picture viewer');
+    lightbox.innerHTML = `
+        <div class="jai_lb_stage"><img class="jai_lb_img" draggable="false" referrerpolicy="no-referrer" alt="${esc(alt)}"></div>
+        <div class="jai_lb_bar" role="toolbar" aria-label="Zoom">
+            <button type="button" class="jai_lb_btn" data-z="out" aria-label="Zoom out" title="Zoom out (−)"><i class="fa-solid fa-minus" aria-hidden="true"></i></button>
+            <span class="jai_lb_pct" aria-live="polite">100%</span>
+            <button type="button" class="jai_lb_btn" data-z="in" aria-label="Zoom in" title="Zoom in (+)"><i class="fa-solid fa-plus" aria-hidden="true"></i></button>
+            <button type="button" class="jai_lb_btn" data-z="fit" aria-label="Fit to screen" title="Fit to screen (0)"><i class="fa-solid fa-expand" aria-hidden="true"></i></button>
+            <button type="button" class="jai_lb_btn jai_lb_close" data-z="close" aria-label="Close picture" title="Close (Esc)"><i class="fa-solid fa-xmark" aria-hidden="true"></i></button>
+        </div>
+        <div class="jai_lb_hint">Scroll or pinch to zoom · drag to move · double-tap to zoom</div>`;
+    root.appendChild(lightbox);
+    const img = lightbox.querySelector('.jai_lb_img');
+    img.addEventListener('load', () => lbLayout(false));
+    img.src = thumb;
+    lbLayout(true);
+    // Swap in the sharper copy once it has downloaded.
+    if (full && full !== thumb) {
+        const sharp = new Image();
+        sharp.referrerPolicy = 'no-referrer';
+        sharp.onload = () => { if (lightbox && lightbox.contains(img)) img.src = full; };
+        sharp.src = full;
+    }
+    wireLightbox();
+    lightbox.querySelector('.jai_lb_close').focus();
+    pushHist();
+}
+
+function closeLightbox() {
+    if (!lightbox) return;
+    if (hist.depth > 0) history.back();
+    else hideLightbox();
+}
+
+function hideLightbox() {
+    lightbox?.remove();
+    lightbox = null;
+    try { lightboxReturnFocus?.focus?.({ preventScroll: true }); } catch { /* ignore */ }
+    lightboxReturnFocus = null;
+}
+
+function lbLayout(reset) {
+    if (!lightbox) return;
+    const stage = lightbox.querySelector('.jai_lb_stage');
+    const img = lightbox.querySelector('.jai_lb_img');
+    zoom.sw = stage.clientWidth;
+    zoom.sh = stage.clientHeight;
+    const nw = img.naturalWidth || 400;
+    const nh = img.naturalHeight || 600;
+    const k = Math.min(zoom.sw / nw, zoom.sh / nh);
+    zoom.w = nw * k;
+    zoom.h = nh * k;
+    img.style.width = `${zoom.w}px`;
+    img.style.height = `${zoom.h}px`;
+    img.style.left = `${(zoom.sw - zoom.w) / 2}px`;
+    img.style.top = `${(zoom.sh - zoom.h) / 2}px`;
+    if (reset) { zoom.s = 1; zoom.x = 0; zoom.y = 0; }
+    lbApply();
+}
+
+function lbApply() {
+    if (!lightbox) return;
+    const left = (zoom.sw - zoom.w) / 2;
+    const top = (zoom.sh - zoom.h) / 2;
+    const ow = zoom.w * zoom.s;
+    const oh = zoom.h * zoom.s;
+    // Keep the picture on screen: centred while it fits, otherwise it can't be dragged past its edges.
+    zoom.x = ow <= zoom.sw ? (zoom.sw - ow) / 2 - left : Math.min(-left, Math.max(zoom.sw - ow - left, zoom.x));
+    zoom.y = oh <= zoom.sh ? (zoom.sh - oh) / 2 - top : Math.min(-top, Math.max(zoom.sh - oh - top, zoom.y));
+    lightbox.querySelector('.jai_lb_img').style.transform = `translate(${zoom.x}px, ${zoom.y}px) scale(${zoom.s})`;
+    lightbox.querySelector('.jai_lb_pct').textContent = `${Math.round(zoom.s * 100)}%`;
+    lightbox.querySelector('[data-z="out"]').disabled = zoom.s <= 1.001;
+    lightbox.querySelector('[data-z="in"]').disabled = zoom.s >= 7.999;
+    lightbox.classList.toggle('jai_lb_zoomed', zoom.s > 1.001);
+}
+
+/** Zoom by a factor around a point (stage coordinates), keeping that point of the picture under the finger/cursor. */
+function lbZoomAt(factor, px = zoom.sw / 2, py = zoom.sh / 2) {
+    const s2 = Math.min(8, Math.max(1, zoom.s * factor));
+    if (s2 === zoom.s) return;
+    const left = (zoom.sw - zoom.w) / 2;
+    const top = (zoom.sh - zoom.h) / 2;
+    const u = (px - left - zoom.x) / zoom.s;
+    const v = (py - top - zoom.y) / zoom.s;
+    zoom.x = px - left - u * s2;
+    zoom.y = py - top - v * s2;
+    zoom.s = s2;
+    lbApply();
+}
+
+function wireLightbox() {
+    const stage = lightbox.querySelector('.jai_lb_stage');
+    const point = (event) => { const r = stage.getBoundingClientRect(); return { x: event.clientX - r.left, y: event.clientY - r.top }; };
+
+    lightbox.addEventListener('click', (event) => {
+        const action = event.target.closest('[data-z]')?.dataset.z;
+        if (action === 'in') lbZoomAt(1.5);
+        else if (action === 'out') lbZoomAt(1 / 1.5);
+        else if (action === 'fit') { zoom.s = 1; zoom.x = 0; zoom.y = 0; lbApply(); }
+        else if (action === 'close') closeLightbox();
+    });
+
+    stage.addEventListener('wheel', (event) => {
+        event.preventDefault();
+        const p = point(event);
+        lbZoomAt(Math.exp(-event.deltaY * (event.ctrlKey ? 0.01 : 0.0018)), p.x, p.y);
+    }, { passive: false });
+
+    const pointers = new Map();
+    let pinch = null;
+    let press = null;
+    let lastTap = { t: 0, x: 0, y: 0 };
+    const mid = () => { const [a, b] = [...pointers.values()]; return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, d: Math.hypot(a.x - b.x, a.y - b.y) || 1 }; };
+
+    stage.addEventListener('pointerdown', (event) => {
+        const p = point(event);
+        pointers.set(event.pointerId, p);
+        try { stage.setPointerCapture(event.pointerId); } catch { /* ignore */ }
+        if (pointers.size === 1) press = { t: Date.now(), x: p.x, y: p.y, moved: false, multi: false, onImage: event.target.classList.contains('jai_lb_img') };
+        if (pointers.size === 2) { pinch = mid(); if (press) press.multi = true; }
+    });
+
+    stage.addEventListener('pointermove', (event) => {
+        const before = pointers.get(event.pointerId);
+        if (!before) return;
+        const p = point(event);
+        pointers.set(event.pointerId, p);
+        if (press && Math.hypot(p.x - press.x, p.y - press.y) > 8) press.moved = true;
+        if (pointers.size === 2 && pinch) {
+            const now = mid();
+            lbZoomAt(now.d / pinch.d, now.x, now.y);
+            zoom.x += now.x - pinch.x;
+            zoom.y += now.y - pinch.y;
+            pinch = now;
+            lbApply();
+        } else if (pointers.size === 1 && zoom.s > 1.001) {
+            zoom.x += p.x - before.x;
+            zoom.y += p.y - before.y;
+            lbApply();
+        }
+    });
+
+    const release = (event) => {
+        if (!pointers.has(event.pointerId)) return;
+        const p = pointers.get(event.pointerId);
+        pointers.delete(event.pointerId);
+        if (pointers.size < 2) pinch = null;
+        if (pointers.size > 0 || !press) return;
+        const tap = !press.moved && !press.multi && Date.now() - press.t < 350 && event.type === 'pointerup';
+        const wasOnImage = press.onImage;
+        press = null;
+        if (!tap) return;
+        const now = Date.now();
+        if (now - lastTap.t < 320 && Math.hypot(p.x - lastTap.x, p.y - lastTap.y) < 40) {
+            // Double-tap / double-click: zoom in on that spot, or back out.
+            lastTap = { t: 0, x: 0, y: 0 };
+            if (zoom.s > 1.05) { zoom.s = 1; zoom.x = 0; zoom.y = 0; lbApply(); } else lbZoomAt(2.5, p.x, p.y);
+        } else {
+            lastTap = { t: now, x: p.x, y: p.y };
+            // A tap on the dark area around the picture closes it.
+            if (!wasOnImage && zoom.s <= 1.001) setTimeout(() => { if (lastTap.t === now) closeLightbox(); }, 330);
+        }
+    };
+    stage.addEventListener('pointerup', release);
+    stage.addEventListener('pointercancel', release);
+}
+
+window.addEventListener('resize', () => lbLayout(false));
+
+// ---- keyboard: Esc / Backspace / Alt+← go back, +/−/0 zoom, Enter on a focused picture or card opens it
+
+document.addEventListener('keydown', (event) => {
+    if (!root?.classList.contains('jai_open')) return;
+
+    if (lightbox) {
+        const k = event.key;
+        if (k === 'Escape') closeLightbox();
+        else if (k === '+' || k === '=') lbZoomAt(1.5);
+        else if (k === '-' || k === '_') lbZoomAt(1 / 1.5);
+        else if (k === '0') { zoom.s = 1; zoom.x = 0; zoom.y = 0; lbApply(); }
+        else if (k.startsWith('Arrow') && zoom.s > 1.001) {
+            const step = 60;
+            zoom.x += k === 'ArrowLeft' ? step : (k === 'ArrowRight' ? -step : 0);
+            zoom.y += k === 'ArrowUp' ? step : (k === 'ArrowDown' ? -step : 0);
+            lbApply();
+        } else if (k === 'Tab') {
+            const buttons = [...lightbox.querySelectorAll('button:not([disabled])')];
+            const i = buttons.indexOf(document.activeElement);
+            const next = buttons[(i + (event.shiftKey ? -1 : 1) + buttons.length) % buttons.length];
+            next?.focus();
+        } else return;
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+    }
+    if (document.querySelector('dialog[open]')) return;
+
+    const target = event.target;
+    const typing = /^(input|textarea|select)$/i.test(target.tagName) || target.isContentEditable;
+    if (typing) return;
+
+    if ((event.key === 'Enter' || event.key === ' ') && target.matches?.('[role="button"], .jai_card, .jai_poster, .jai_zoomable')) {
+        event.preventDefault();
+        event.stopPropagation();
+        target.click();
+        return;
+    }
+    if (state.detail && (event.key === 'Escape' || event.key === 'Backspace' || (event.altKey && event.key === 'ArrowLeft'))) {
+        event.preventDefault();
+        event.stopPropagation();
+        goBack();
+    }
+}, true);
+
+/** Makes the page's pictures, cards and buttons reachable by keyboard and screen readers. Runs after every redraw. */
+let decoratePending = false;
+function decorate() {
+    if (decoratePending || !root) return;
+    decoratePending = true;
+    requestAnimationFrame(() => {
+        decoratePending = false;
+        root.querySelectorAll('.jai_jimage img, .jai_sportrait img, .jai_detail_side > img').forEach((img) => {
+            if (img.classList.contains('jai_zoomable')) return;
+            img.classList.add('jai_zoomable');
+            img.tabIndex = 0;
+            img.setAttribute('role', 'button');
+            img.setAttribute('aria-label', 'View the full picture (zoom)');
+            img.title = 'Click to enlarge and zoom';
+        });
+        root.querySelectorAll('div.jai_btn, span.jai_btn, span.jai_iconbtn, div.jai_tab, span.jai_seg').forEach((el) => {
+            if (el.hasAttribute('role')) return;
+            el.setAttribute('role', 'button');
+            el.tabIndex = 0;
+            if (!el.getAttribute('aria-label') && !el.innerText.trim() && el.title) el.setAttribute('aria-label', el.title);
+        });
+        root.querySelectorAll('.jai_card, .jai_poster').forEach((card) => {
+            if (card.hasAttribute('tabindex')) return;
+            card.tabIndex = 0;
+            card.setAttribute('role', 'link');
+            const name = card.querySelector('.jai_sname b, .jai_card_title, .jai_poster_name')?.textContent.trim();
+            if (name) card.setAttribute('aria-label', name);
+        });
+        updateBackBar();
+    });
+}
+
 function setView(view) {
-    // A page replaces the list: drop any list still loading, so its answer can't cover the page.
+    const body = root.querySelector('.jai_body');
     if (view === 'detail') {
+        // A page replaces the list: drop any list still loading, so its answer can't cover the page,
+        // and remember where the list was so Back returns to exactly that spot.
         listRequest++;
         state.loading = false;
+        if ($('#jai_grid').style.display !== 'none') state.listScroll = body.scrollTop;
+        if (hist.depth === 0) pushHist();
+        body.scrollTop = 0;
+    } else {
+        dropHist();
     }
+    $('#jai_backbar').style.display = view === 'detail' ? '' : 'none';
+    if (view === 'detail') updateBackBar();
     $('#jai_grid').style.display = view === 'grid' ? '' : 'none';
-    $('#jai_creator').style.display = view === 'grid' && state.creator ? '' : 'none';
+    $('#jai_creator').style.display = view === 'grid' && (state.creator || isLocalView()) ? '' : 'none';
     $('#jai_filters').style.display = view === 'grid' ? '' : 'none';
     $('#jai_detail').style.display = view === 'detail' ? '' : 'none';
     root.querySelector('.jai_footer').style.display = view === 'grid' ? '' : 'none';
@@ -3377,7 +3727,7 @@ async function openDetail(id) {
                 <div class="jai_jcard">
                     <h2 class="jai_detail_title">${esc(detail.name)}</h2>
                     <div class="jai_jimage">
-                        ${detail.avatar ? `<img referrerpolicy="no-referrer" src="${esc(avatarUrl(detail.avatar, 900))}" alt="">` : ''}
+                        ${detail.avatar ? `<img referrerpolicy="no-referrer" src="${esc(avatarUrl(detail.avatar, 900))}" data-full="${esc(AVATARS + encodeURIComponent(detail.avatar))}" alt="">` : ''}
                         <span class="jai_stats" title="Chats · messages"><i class="fa-regular fa-message"></i> ${compact(detail.stats?.chat)} <i class="fa-regular fa-comments"></i> ${compact(detail.stats?.message)}</span>
                     </div>
                     <div class="jai_jby">
@@ -3433,7 +3783,7 @@ async function openDetail(id) {
 
     box.querySelector('[data-jai-connect]')?.addEventListener('click', () => showConnect());
     wireComments(box, 'janitor', detail.id);
-    box.querySelector('.jai_back').addEventListener('click', () => ($('#jai_grid').children.length ? (setView('grid'), showMessage('')) : loadList()));
+    box.querySelector('.jai_back').addEventListener('click', goBack);
     box.querySelector('.jai_raw').addEventListener('click', async () => {
         await copyText(JSON.stringify(detail, null, 2), 'Raw character data copied to the clipboard.');
     });
@@ -3617,7 +3967,7 @@ async function openChubDetail(fullPath) {
             ${commentsPanel(chubPageUrl(node.fullPath), 'Chub')}
         </div>`;
 
-    box.querySelector('.jai_back').addEventListener('click', () => ($('#jai_grid').children.length ? (setView('grid'), showMessage('')) : loadList()));
+    box.querySelector('.jai_back').addEventListener('click', goBack);
     box.querySelector('.jai_raw').addEventListener('click', () => copyText(JSON.stringify(node, null, 2), 'Raw data copied to the clipboard.'));
     wireComments(box, 'chub', node.id);
 
@@ -3876,7 +4226,7 @@ async function openSauceDetail(id, preload = null) {
         ${commentsPanel(saucePage(c.id), 'Saucepan')}`;
 
     box.querySelector('[data-jai-connect]')?.addEventListener('click', () => showConnect());
-    box.querySelector('.jai_back').addEventListener('click', () => ($('#jai_grid').children.length ? (setView('grid'), showMessage('')) : loadList()));
+    box.querySelector('.jai_back').addEventListener('click', goBack);
     box.querySelector('.jai_raw').addEventListener('click', () => copyText(JSON.stringify(c, null, 2), 'Raw data copied to the clipboard.'));
     wireComments(box, 'saucepan', c.id);
 
@@ -4048,7 +4398,7 @@ async function openSauceLorebook(id) {
         </div>
         ${commentsPanel(saucePage(id, 'lorebook'), 'Saucepan')}`;
     box.querySelector('[data-jai-connect]')?.addEventListener('click', () => showConnect());
-    box.querySelector('.jai_back').addEventListener('click', () => ($('#jai_grid').children.length ? (setView('grid'), showMessage('')) : loadList()));
+    box.querySelector('.jai_back').addEventListener('click', goBack);
     wireComments(box, 'saucepan-lorebook', id);
 
     let result = null;
@@ -4083,6 +4433,8 @@ async function openBrowser() {
 }
 
 function closeBrowser() {
+    hideLightbox();
+    dropHist();
     root?.classList.remove('jai_open');
 }
 

@@ -2721,3 +2721,210 @@
     white-space: nowrap;
     overflow-x: auto;
 }
+
+/* =================================================================================================
+   Going back, picture viewer, keyboard focus
+   ================================================================================================= */
+
+/* Sticky back bar: always at the top of a page, big enough to hit with a thumb. */
+#jai_browser .jai_backbar {
+    position: sticky;
+    top: -14px;
+    z-index: 6;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin: -14px -14px 12px;
+    padding: 8px 14px;
+    background: color-mix(in srgb, var(--jai-panel) 92%, transparent);
+    backdrop-filter: blur(8px);
+    border-bottom: 1px solid var(--jai-line);
+}
+
+#jai_browser .jai_backbtn {
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 9px;
+    min-height: 44px;
+    padding: 0 18px 0 14px;
+    border: 1px solid var(--jai-violet);
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--jai-violet) 22%, transparent);
+    color: var(--jai-text);
+    font-size: 15px;
+    font-weight: 700;
+    line-height: 1;
+    font-family: inherit;
+    cursor: pointer;
+    transition: background 0.12s, transform 0.12s;
+}
+
+#jai_browser .jai_backbtn:hover {
+    background: color-mix(in srgb, var(--jai-violet) 40%, transparent);
+}
+
+#jai_browser .jai_backbtn:active {
+    transform: scale(0.97);
+}
+
+#jai_browser .jai_backbtn i {
+    font-size: 16px;
+}
+
+#jai_browser .jai_backwhere {
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    color: var(--jai-dim);
+    font-size: 13px;
+}
+
+/* Keyboard users can always see where they are. */
+#jai_browser button:focus-visible,
+#jai_browser [role="button"]:focus-visible,
+#jai_browser [role="link"]:focus-visible,
+#jai_browser .jai_zoomable:focus-visible,
+#jai_lightbox button:focus-visible {
+    outline: 3px solid var(--jai-pink);
+    outline-offset: 2px;
+}
+
+#jai_browser .jai_zoomable {
+    cursor: zoom-in;
+}
+
+/* ---------- picture viewer ---------- */
+
+#jai_lightbox {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    height: 100dvh;
+    z-index: 20;
+    background: rgba(0, 0, 0, 0.94);
+    display: flex;
+    flex-direction: column;
+    -webkit-user-select: none;
+    user-select: none;
+}
+
+#jai_lightbox .jai_lb_stage {
+    position: relative;
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+    touch-action: none;
+    cursor: zoom-in;
+}
+
+#jai_lightbox.jai_lb_zoomed .jai_lb_stage {
+    cursor: grab;
+}
+
+#jai_lightbox.jai_lb_zoomed .jai_lb_stage:active {
+    cursor: grabbing;
+}
+
+#jai_lightbox .jai_lb_img {
+    position: absolute;
+    max-width: none;
+    max-height: none;
+    transform-origin: 0 0;
+    will-change: transform;
+    -webkit-user-drag: none;
+    pointer-events: auto;
+}
+
+#jai_lightbox .jai_lb_bar {
+    position: absolute;
+    left: 50%;
+    bottom: calc(18px + env(safe-area-inset-bottom, 0px));
+    transform: translateX(-50%);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px;
+    border-radius: 999px;
+    background: rgba(24, 24, 28, 0.88);
+    backdrop-filter: blur(8px);
+    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.6);
+}
+
+#jai_lightbox .jai_lb_btn {
+    display: grid;
+    place-items: center;
+    width: 46px;
+    height: 46px;
+    border: 0;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.1);
+    color: #fff;
+    font-size: 17px;
+    cursor: pointer;
+}
+
+#jai_lightbox .jai_lb_btn:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.22);
+}
+
+#jai_lightbox .jai_lb_btn:disabled {
+    opacity: 0.35;
+    cursor: default;
+}
+
+#jai_lightbox .jai_lb_close {
+    background: rgba(220, 60, 60, 0.7);
+}
+
+#jai_lightbox .jai_lb_pct {
+    min-width: 52px;
+    text-align: center;
+    color: #fff;
+    font-size: 14px;
+    font-variant-numeric: tabular-nums;
+}
+
+#jai_lightbox .jai_lb_hint {
+    position: absolute;
+    top: 12px;
+    left: 0;
+    right: 0;
+    text-align: center;
+    color: rgba(255, 255, 255, 0.55);
+    font-size: 12px;
+    pointer-events: none;
+    animation: jai_lb_fade 4s forwards;
+}
+
+@keyframes jai_lb_fade {
+    0%, 70% { opacity: 1; }
+    100% { opacity: 0; }
+}
+
+@media (max-width: 700px) {
+    #jai_browser .jai_backbar {
+        top: -8px;
+        margin: -8px -8px 10px;
+        padding: 6px 8px;
+    }
+
+    #jai_browser .jai_backbtn {
+        min-height: 46px;
+        padding: 0 16px 0 12px;
+    }
+
+    #jai_lightbox .jai_lb_btn {
+        width: 50px;
+        height: 50px;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    #jai_lightbox .jai_lb_hint {
+        animation: none;
+    }
+}

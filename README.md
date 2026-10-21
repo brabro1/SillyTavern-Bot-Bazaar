@@ -31,6 +31,12 @@ Open it with the store button next to "Import content from external URL" in the 
 - Character pages show the creator's description with their own colours, fonts and styling, a
   **Lorebooks** panel (name, kind — lorebook, linked, embedded or code script — and whether it can be
   imported), a preview of the definition, and the **comments** with replies.
+- **Click a character's picture** to open it full screen and zoom: the + / − buttons, the mouse wheel, pinch with
+  two fingers, double-click/double-tap, and drag to move around. `Esc` closes it.
+- **Back** returns to the list exactly where you left it (same scroll position, same page of results, same card
+  focused). A sticky **Back** bar stays at the top of every character page, `Esc` / `Backspace` / `Alt+←` and your
+  phone's own back button or swipe all go back inside Bot Bazaar, and every button, tab and card can be reached
+  with the keyboard (`Tab`, `Enter`).
 - Paste a `janitorai.com/characters/…`, `janitorai.com/profiles/…`, `chub.ai/characters/…`,
   `chub.ai/lorebooks/…`, `saucepan.ai/companion/…`, `saucepan.ai/lorebook/…` or `saucepan.ai/u/…` link into
   the search box to jump straight to it.
