@@ -2581,7 +2581,20 @@ async function copyText(text, message) {
         await navigator.clipboard.writeText(text);
         toastr.info(message, 'Bot Bazaar');
     } catch {
-        // Clipboard access is blocked on plain-http pages that aren't localhost (e.g. a phone on the home network).
+        // The clipboard API is blocked on plain-http pages that aren't localhost (e.g. a phone on the home network),
+        // but copying from a selected text box still works there.
+        const box = document.createElement('textarea');
+        box.value = text;
+        box.setAttribute('readonly', '');
+        box.style.cssText = 'position:fixed;left:0;top:0;width:1px;height:1px;opacity:0;font-size:16px';
+        document.body.appendChild(box);
+        box.focus();
+        box.select();
+        box.setSelectionRange(0, text.length);
+        let copied = false;
+        try { copied = document.execCommand('copy'); } catch { /* not allowed here */ }
+        box.remove();
+        if (copied) return toastr.info(message, 'Bot Bazaar');
         await ctx().Popup.show.input('Copy this text', 'Select all of it and copy.', text);
     }
 }
@@ -2702,6 +2715,7 @@ function showConnect(reason = '') {
             <ul>
                 <li><b>Computer:</b> press <b>Ctrl+Shift+B</b> to show the bookmarks bar, then drag this onto it: <a class="jai_bookmarklet" href="${esc(buildBookmarklet())}" title="Drag me to the bookmarks bar">Bot Bazaar</a></li>
                 <li><b>Phone:</b> ${button('copycode', 'fa-copy', 'Copy bookmark code')} then bookmark any page, edit that bookmark, paste the code as its address and name it <b>bazaar</b>. On JanitorAI, Chub or Saucepan, type <b>bazaar</b> in the address bar and tap the bookmark.</li>
+                <li class="jai_note">This bookmark opens SillyTavern at <b>${esc(location.origin)}</b>, so make it on the phone itself, from the SillyTavern address the phone uses (a bookmark copied from another device opens the wrong address). While it runs you'll see an orange message at the top of the page; a red one means something went wrong and says what.</li>
             </ul>
             <p class="jai_note">Added the bookmark before? Replace it with this one — it now works on Saucepan too.</p>
         </details>
@@ -4095,6 +4109,7 @@ function showSauceSetup() {
                 <ul>
                     <li><b>Computer:</b> press <b>Ctrl+Shift+B</b> to show the bookmarks bar, then drag this onto it: <a class="jai_bookmarklet" href="${esc(buildBookmarklet())}" title="Drag me to the bookmarks bar">Bot Bazaar</a></li>
                     <li><b>Phone:</b> ${button('copycode', 'fa-copy', 'Copy bookmark code')} then bookmark any page, edit that bookmark, paste the code as its address and name it <b>bazaar</b>. On Saucepan, type <b>bazaar</b> in the address bar and tap the bookmark.</li>
+                    <li class="jai_note">This bookmark opens SillyTavern at <b>${esc(location.origin)}</b> — make it on the device you'll use it on. An orange message at the top of the page means it's working; a red one says what went wrong.</li>
                 </ul>
                 <p class="jai_note">Added it before? Replace it with this one — older copies only connect your login.</p>
             </details>
@@ -4450,189 +4465,212 @@ function closeBrowser() {
  */
 async function botBazaarBookmark(ST) {
     /* No // comments in here: browsers remove line breaks from bookmarks, so a // comment would swallow the rest of the code. */
-    const CHUB = /(^|\.)(chub\.ai|characterhub\.org)$/.test(location.hostname);
-    const JANITOR = /(^|\.)janitorai\.com$/.test(location.hostname);
-    const SAUCEPAN = /(^|\.)saucepan\.ai$/.test(location.hostname);
-    if (!CHUB && !JANITOR && !SAUCEPAN) { alert('Open janitorai.com, chub.ai or saucepan.ai (signed in) first, then press this.'); return; }
-    let payload;
     let note = null;
-    if (SAUCEPAN) {
-        /* Saucepan only answers its own website, so the work happens here, with this tab's own login: the */
-        /* account, the bot (or lorebook) whose page this is, and the favorites. SillyTavern needs no setup for it. */
-        const key = localStorage.getItem('hallucination/auth_token') || '';
-        if (!key) { alert('No Saucepan login found here. Sign in to saucepan.ai first.'); return; }
-        note = document.createElement('div');
-        note.style.cssText = 'position:fixed;z-index:2147483647;left:50%;top:16px;transform:translateX(-50%);background:#ff6a3d;color:#fff;padding:10px 18px;border-radius:999px;font:600 14px sans-serif;box-shadow:0 6px 20px rgba(0,0,0,.4)';
-        note.textContent = 'Bot Bazaar: connecting…';
-        document.body.appendChild(note);
-        const H = { Authorization: 'Bearer ' + key, 'cf-edge-token-8af3': 'e3b0c44298fc1c14' };
-        const call = async (path, body) => {
-            try {
-                const r = await fetch(path, body ? { method: 'POST', headers: Object.assign({ 'Content-Type': 'application/json' }, H), body: JSON.stringify(body) } : { headers: H });
-                const d = await r.json().catch(() => null);
-                return { status: r.status, data: d };
-            } catch (e) { return { status: 0, data: null }; }
-        };
-        const sauce = {};
-        const me = await call('/api/v1/users/me');
-        const u = me.data && (me.data.user || me.data);
-        if (u && u.id) sauce.me = { id: u.id, handle: u.handle, is_verified: u.is_verified };
-        const page = location.pathname.match(/\/(companion|lorebook)\/([0-9a-f-]{36})/i);
-        /* Saucepan sends definitions to other apps only scrambled, but shows them on this page to you. So, like you */
-        /* would by hand, open the page's own "Definition → Show" and "View scenarios", and read what it displays. */
-        const wait = ms => new Promise(r => setTimeout(r, ms));
-        const reveal = async (button) => {
-            const added = [];
-            const mo = new MutationObserver(ms => ms.forEach(m => m.addedNodes.forEach(x => { if (x.nodeType === 1) added.push(x); })));
-            mo.observe(document.body, { childList: true, subtree: true });
-            button.click();
-            for (let i = 0; i < 20 && !added.some(x => x.innerText && x.innerText.length > 40); i++) await wait(150);
-            await wait(300);
-            mo.disconnect();
-            const top = added.filter(x => x.isConnected && !added.some(o => o !== x && o.contains(x)));
-            return top.sort((a, b) => b.innerText.length - a.innerText.length)[0] || null;
-        };
-        const readPage = async () => {
-            const out = {};
-            /* "Definition: Open — Show": the label has its own text plus the state inside it. Wait for the page to draw it. */
-            const findLabel = () => [].slice.call(document.querySelectorAll('body *')).find(e => [].slice.call(e.childNodes).some(n => n.nodeType === 3 && /^\s*Definition:?\s*$/.test(n.textContent)));
-            let label = findLabel();
-            for (let i = 0; i < 40 && !label; i++) { await wait(200); label = findLabel(); }
-            let btn = null;
-            for (let n = label, i = 0; n && i < 5 && !btn; i++) {
-                n = n.parentElement;
-                btn = n && [].slice.call(n.querySelectorAll('button')).find(b => /^(show|hide)$/i.test(b.innerText.trim()));
-            }
-            if (btn) {
-                if (/hide/i.test(btn.innerText)) { btn.click(); await wait(500); }
-                const box = await reveal(btn);
-                if (box) out.definition = box.innerText;
-                btn.click();
-            }
-            const scen = [].slice.call(document.querySelectorAll('button')).find(b => /^view .*scenarios?$/i.test(b.innerText.trim()));
-            if (scen) {
-                const dialog = await reveal(scen);
-                const list = [];
-                let persona = '';
-                for (let i = 0; dialog && i < 30; i++) {
-                    const text = dialog.innerText;
-                    const m = text.match(/Scenario (\d+) of (\d+)\n/);
-                    if (!m) break;
-                    const lines = text.split('\n');
-                    const end = text.indexOf('\nPrev\n', m.index);
-                    const msg = text.slice(m.index + m[0].length, end > 0 ? end : undefined).trim();
-                    const head = text.slice(0, m.index).split('\n').filter(l => l.trim() && !/can be edited/i.test(l));
-                    const pi = lines.lastIndexOf('Start Chat');
-                    if (pi > 0) persona = lines[pi - 1].trim();
-                    list.push({ title: head[head.length - 1] || '', message: msg });
-                    if (Number(m[1]) >= Number(m[2])) break;
-                    const next = [].slice.call(dialog.querySelectorAll('button')).find(b => b.innerText.trim() === 'Next');
-                    if (!next) break;
-                    next.click();
-                    for (let k = 0; k < 20 && dialog.innerText.indexOf('Scenario ' + (Number(m[1]) + 1) + ' of') < 0; k++) await wait(100);
-                }
-                out.scenarios = list;
-                out.persona = persona;
-                document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-            }
-            return out;
-        };
-        if (page && page[1].toLowerCase() === 'companion') {
-            note.textContent = 'Bot Bazaar: reading this character…';
-            let shown = {};
-            try { shown = await readPage(); } catch (e) { /* the page didn't show it; the rest still comes */ }
-            note.textContent = 'Bot Bazaar: getting this character…';
-            const id = page[2];
-            const c = await call('/api/v2/companions/' + id);
-            /* The page description comes scrambled; Bot Bazaar doesn't use it, so leave it out. */
-            if (c.data && c.data.companion) { delete c.data.companion.full_description_fragments; delete c.data.companion.starting_scenarios_fragments; }
-            const d = await call('/api/v1/companion/definition?companion_id=' + id);
-            const l = await call('/api/v2/companions/' + id + '/lorebooks');
-            const books = [];
-            for (const b of (l.data && l.data.lorebooks) || []) {
-                const r = await call('/api/v1/lorebooks/' + b.id);
-                books.push({ meta: b, status: r.status, data: r.status === 200 ? r.data : null });
-            }
-            const titles = d.data && Array.isArray(d.data.sections) ? d.data.sections.map(s => s && s.title).filter(Boolean) : [];
-            /* The scrambled copy isn't sent along; what the page showed is. */
-            sauce.companion = { data: c.data, definition: { status: d.status, data: null, titles: titles, message: d.data && d.data.error ? d.data.error.message : '' }, shown: shown, books: books, booksStatus: l.status };
-        } else if (page) {
-            note.textContent = 'Bot Bazaar: getting this lorebook…';
-            const r = await call('/api/v1/lorebooks/' + page[2]);
-            sauce.lorebook = { id: page[2], status: r.status, data: r.status === 200 ? r.data : null };
-        }
-        if (sauce.me) {
-            note.textContent = 'Bot Bazaar: getting your favorites…';
-            const favs = [];
-            let ok = true;
-            const pages = [['/api/v1/search', 'companions', 'character', { special_view: { view: 'favorites' } }], ['/api/v1/search/favorited-lorebooks', 'lorebooks', 'lorebook', {}]];
-            for (const [path, field, kind, extra] of pages) {
-                for (let o = 0; o < 960; o += 24) {
-                    const r = await call(path, Object.assign({ order_by: 'favorited_at', asc: false, offset: o, limit: 24, sus: true }, extra));
-                    const list = r.data && r.data[field];
-                    if (r.status !== 200 || !Array.isArray(list)) { if (kind === 'character') ok = false; break; }
-                    list.forEach(x => favs.push({ id: x.id, kind: kind, name: x.display_name || x.name, image: kind === 'character' ? (x.image && x.image.id) : x.image_id, creator: x.author_handle || x.owner_handle, creatorId: x.author_id || x.owner_id }));
-                    if (list.length < 24) break;
-                }
-            }
-            /* Only a complete list may replace the old one (otherwise favorites would vanish). */
-            if (ok) sauce.favorites = favs;
-        }
-        note.textContent = 'Bot Bazaar: opening SillyTavern…';
-        payload = { v: 1, saucepan: key, sauce: sauce };
-    } else if (CHUB) {
-        let key = localStorage.getItem('URQL_TOKEN') || '';
-        try { const parsed = JSON.parse(key); if (typeof parsed === 'string') key = parsed; } catch (e) { /* already plain */ }
-        if (!key) { alert('No Chub login found here. Sign in to chub.ai first.'); return; }
-        payload = { v: 1, chub: key };
-    } else {
-        const decode = (s) => {
-            try { s = decodeURIComponent(s); } catch (e) { /* already decoded */ }
-            const m = s.match(/base64-([\w+/=-]+)/);
-            if (m) { try { return atob(m[1].replace(/-/g, '+').replace(/_/g, '/')); } catch (e) { /* not base64 */ } }
-            return s;
-        };
-        const cookies = {};
-        document.cookie.split(';').map(p => p.trim()).forEach((p) => { const i = p.indexOf('='); if (i > 0) cookies[p.slice(0, i)] = p.slice(i + 1); });
-        const groups = {};
-        Object.keys(cookies).filter(k => /auth-token/i.test(k)).sort().forEach((k) => { const base = k.replace(/\.\d+$/, ''); groups[base] = (groups[base] || '') + cookies[k]; });
-        const candidates = Object.values(groups);
-        for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); if (/auth-token|^sb-/i.test(k)) candidates.push(localStorage.getItem(k)); }
-        let session = null;
-        for (const raw of candidates) { try { const o = JSON.parse(decode(raw)); if (o && o.access_token && o.refresh_token) { session = o; break; } } catch (e) { /* skip */ } }
-        if (!session) { alert('No JanitorAI login found here. Sign in to janitorai.com first.'); return; }
-        let apikey = '';
+    const say = (text, bad) => {
         try {
-            const src = [].slice.call(document.querySelectorAll('script[src]')).map(s => s.src).filter(s => /index-.*\.js/.test(s))[0];
-            const txt = await (await fetch(src)).text();
-            const jwts = txt.match(/eyJ[\w-]+\.eyJ[\w-]+\.[\w-]+/g) || [];
-            apikey = jwts.filter((j) => { try { return JSON.parse(atob(j.split('.')[1].replace(/-/g, '+').replace(/_/g, '/'))).role === 'anon'; } catch (e) { return false; } })[0] || '';
-        } catch (e) { /* no renewal key; the login still works until it expires */ }
-        payload = { v: 1, janitor: { access_token: session.access_token, refresh_token: session.refresh_token, expires_at: session.expires_at, apikey } };
+            if (!note) {
+                note = document.createElement('div');
+                note.style.cssText = 'position:fixed;z-index:2147483647;left:50%;top:16px;max-width:90vw;transform:translateX(-50%);color:#fff;padding:10px 18px;border-radius:18px;font:600 14px sans-serif;text-align:center;box-shadow:0 6px 20px rgba(0,0,0,.4)';
+                (document.body || document.documentElement).appendChild(note);
+            }
+            note.style.background = bad ? '#c0392b' : '#ff6a3d';
+            note.textContent = text;
+        } catch (e) { /* no page to draw on */ }
+    };
+    const run = async () => {
+        const CHUB = /(^|\.)(chub\.ai|characterhub\.org)$/.test(location.hostname);
+        const JANITOR = /(^|\.)janitorai\.com$/.test(location.hostname);
+        const SAUCEPAN = /(^|\.)saucepan\.ai$/.test(location.hostname);
+        if (!CHUB && !JANITOR && !SAUCEPAN) { alert('Open janitorai.com, chub.ai or saucepan.ai (signed in) first, then press this.'); return; }
+        let payload;
+        if (SAUCEPAN) {
+            /* Saucepan only answers its own website, so the work happens here, with this tab's own login: the */
+            /* account, the bot (or lorebook) whose page this is, and the favorites. SillyTavern needs no setup for it. */
+            const key = localStorage.getItem('hallucination/auth_token') || '';
+            if (!key) { alert('No Saucepan login found here. Sign in to saucepan.ai first.'); return; }
+            say('Bot Bazaar: connecting…');
+            const H = { Authorization: 'Bearer ' + key, 'cf-edge-token-8af3': 'e3b0c44298fc1c14' };
+            const call = async (path, body) => {
+                try {
+                    const r = await fetch(path, body ? { method: 'POST', headers: Object.assign({ 'Content-Type': 'application/json' }, H), body: JSON.stringify(body) } : { headers: H });
+                    const d = await r.json().catch(() => null);
+                    return { status: r.status, data: d };
+                } catch (e) { return { status: 0, data: null }; }
+            };
+            const sauce = {};
+            const me = await call('/api/v1/users/me');
+            const u = me.data && (me.data.user || me.data);
+            if (u && u.id) sauce.me = { id: u.id, handle: u.handle, is_verified: u.is_verified };
+            const page = location.pathname.match(/\/(companion|lorebook)\/([0-9a-f-]{36})/i);
+            /* Saucepan sends definitions to other apps only scrambled, but shows them on this page to you. So, like you */
+            /* would by hand, open the page's own "Definition → Show" and "View scenarios", and read what it displays. */
+            const wait = ms => new Promise(r => setTimeout(r, ms));
+            const reveal = async (button) => {
+                const added = [];
+                const mo = new MutationObserver(ms => ms.forEach(m => m.addedNodes.forEach(x => { if (x.nodeType === 1) added.push(x); })));
+                mo.observe(document.body, { childList: true, subtree: true });
+                button.click();
+                for (let i = 0; i < 20 && !added.some(x => x.innerText && x.innerText.length > 40); i++) await wait(150);
+                await wait(300);
+                mo.disconnect();
+                const top = added.filter(x => x.isConnected && !added.some(o => o !== x && o.contains(x)));
+                return top.sort((a, b) => b.innerText.length - a.innerText.length)[0] || null;
+            };
+            const readPage = async () => {
+                const out = {};
+                /* "Definition: Open — Show": the label has its own text plus the state inside it. Wait for the page to draw it. */
+                const findLabel = () => [].slice.call(document.querySelectorAll('body *')).find(e => [].slice.call(e.childNodes).some(n => n.nodeType === 3 && /^\s*Definition:?\s*$/.test(n.textContent)));
+                let label = findLabel();
+                for (let i = 0; i < 40 && !label; i++) { await wait(200); label = findLabel(); }
+                let btn = null;
+                for (let n = label, i = 0; n && i < 5 && !btn; i++) {
+                    n = n.parentElement;
+                    btn = n && [].slice.call(n.querySelectorAll('button')).find(b => /^(show|hide)$/i.test(b.innerText.trim()));
+                }
+                if (btn) {
+                    if (/hide/i.test(btn.innerText)) { btn.click(); await wait(500); }
+                    const box = await reveal(btn);
+                    if (box) out.definition = box.innerText;
+                    btn.click();
+                }
+                const scen = [].slice.call(document.querySelectorAll('button')).find(b => /^view .*scenarios?$/i.test(b.innerText.trim()));
+                if (scen) {
+                    const dialog = await reveal(scen);
+                    const list = [];
+                    let persona = '';
+                    for (let i = 0; dialog && i < 30; i++) {
+                        const text = dialog.innerText;
+                        const m = text.match(/Scenario (\d+) of (\d+)\n/);
+                        if (!m) break;
+                        const lines = text.split('\n');
+                        const end = text.indexOf('\nPrev\n', m.index);
+                        const msg = text.slice(m.index + m[0].length, end > 0 ? end : undefined).trim();
+                        const head = text.slice(0, m.index).split('\n').filter(l => l.trim() && !/can be edited/i.test(l));
+                        const pi = lines.lastIndexOf('Start Chat');
+                        if (pi > 0) persona = lines[pi - 1].trim();
+                        list.push({ title: head[head.length - 1] || '', message: msg });
+                        if (Number(m[1]) >= Number(m[2])) break;
+                        const next = [].slice.call(dialog.querySelectorAll('button')).find(b => b.innerText.trim() === 'Next');
+                        if (!next) break;
+                        next.click();
+                        for (let k = 0; k < 20 && dialog.innerText.indexOf('Scenario ' + (Number(m[1]) + 1) + ' of') < 0; k++) await wait(100);
+                    }
+                    out.scenarios = list;
+                    out.persona = persona;
+                    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+                }
+                return out;
+            };
+            if (page && page[1].toLowerCase() === 'companion') {
+                say('Bot Bazaar: reading this character…');
+                let shown = {};
+                try { shown = await readPage(); } catch (e) { /* the page didn't show it; the rest still comes */ }
+                say('Bot Bazaar: getting this character…');
+                const id = page[2];
+                const c = await call('/api/v2/companions/' + id);
+                /* The page description comes scrambled; Bot Bazaar doesn't use it, so leave it out. */
+                if (c.data && c.data.companion) { delete c.data.companion.full_description_fragments; delete c.data.companion.starting_scenarios_fragments; }
+                const d = await call('/api/v1/companion/definition?companion_id=' + id);
+                const l = await call('/api/v2/companions/' + id + '/lorebooks');
+                const books = [];
+                for (const b of (l.data && l.data.lorebooks) || []) {
+                    const r = await call('/api/v1/lorebooks/' + b.id);
+                    books.push({ meta: b, status: r.status, data: r.status === 200 ? r.data : null });
+                }
+                const titles = d.data && Array.isArray(d.data.sections) ? d.data.sections.map(s => s && s.title).filter(Boolean) : [];
+                /* The scrambled copy isn't sent along; what the page showed is. */
+                sauce.companion = { data: c.data, definition: { status: d.status, data: null, titles: titles, message: d.data && d.data.error ? d.data.error.message : '' }, shown: shown, books: books, booksStatus: l.status };
+            } else if (page) {
+                say('Bot Bazaar: getting this lorebook…');
+                const r = await call('/api/v1/lorebooks/' + page[2]);
+                sauce.lorebook = { id: page[2], status: r.status, data: r.status === 200 ? r.data : null };
+            }
+            if (sauce.me) {
+                say('Bot Bazaar: getting your favorites…');
+                const favs = [];
+                let ok = true;
+                const pages = [['/api/v1/search', 'companions', 'character', { special_view: { view: 'favorites' } }], ['/api/v1/search/favorited-lorebooks', 'lorebooks', 'lorebook', {}]];
+                for (const [path, field, kind, extra] of pages) {
+                    for (let o = 0; o < 960; o += 24) {
+                        const r = await call(path, Object.assign({ order_by: 'favorited_at', asc: false, offset: o, limit: 24, sus: true }, extra));
+                        const list = r.data && r.data[field];
+                        if (r.status !== 200 || !Array.isArray(list)) { if (kind === 'character') ok = false; break; }
+                        list.forEach(x => favs.push({ id: x.id, kind: kind, name: x.display_name || x.name, image: kind === 'character' ? (x.image && x.image.id) : x.image_id, creator: x.author_handle || x.owner_handle, creatorId: x.author_id || x.owner_id }));
+                        if (list.length < 24) break;
+                    }
+                }
+                /* Only a complete list may replace the old one (otherwise favorites would vanish). */
+                if (ok) sauce.favorites = favs;
+            }
+            say('Bot Bazaar: opening SillyTavern…');
+            payload = { v: 1, saucepan: key, sauce: sauce };
+        } else if (CHUB) {
+            say('Bot Bazaar: reading your Chub login…');
+            let key = localStorage.getItem('URQL_TOKEN') || '';
+            try { const parsed = JSON.parse(key); if (typeof parsed === 'string') key = parsed; } catch (e) { /* already plain */ }
+            if (!key) { alert('No Chub login found here. Sign in to chub.ai first.'); return; }
+            payload = { v: 1, chub: key };
+        } else {
+            say('Bot Bazaar: reading your JanitorAI login…');
+            const decode = (s) => {
+                try { s = decodeURIComponent(s); } catch (e) { /* already decoded */ }
+                const m = s.match(/base64-([\w+/=-]+)/);
+                if (m) { try { return atob(m[1].replace(/-/g, '+').replace(/_/g, '/')); } catch (e) { /* not base64 */ } }
+                return s;
+            };
+            const cookies = {};
+            document.cookie.split(';').map(p => p.trim()).forEach((p) => { const i = p.indexOf('='); if (i > 0) cookies[p.slice(0, i)] = p.slice(i + 1); });
+            const groups = {};
+            Object.keys(cookies).filter(k => /auth-token/i.test(k)).sort().forEach((k) => { const base = k.replace(/\.\d+$/, ''); groups[base] = (groups[base] || '') + cookies[k]; });
+            const candidates = Object.values(groups);
+            for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); if (/auth-token|^sb-/i.test(k)) candidates.push(localStorage.getItem(k)); }
+            let session = null;
+            for (const raw of candidates) { try { const o = JSON.parse(decode(raw)); if (o && o.access_token && o.refresh_token) { session = o; break; } } catch (e) { /* skip */ } }
+            if (!session) { alert('No JanitorAI login found here. Sign in to janitorai.com first.'); return; }
+            let apikey = '';
+            try {
+                const src = [].slice.call(document.querySelectorAll('script[src]')).map(s => s.src).filter(s => /index-.*\.js/.test(s))[0];
+                const txt = await (await fetch(src)).text();
+                const jwts = txt.match(/eyJ[\w-]+\.eyJ[\w-]+\.[\w-]+/g) || [];
+                apikey = jwts.filter((j) => { try { return JSON.parse(atob(j.split('.')[1].replace(/-/g, '+').replace(/_/g, '/'))).role === 'anon'; } catch (e) { return false; } })[0] || '';
+            } catch (e) { /* no renewal key; the login still works until it expires */ }
+            payload = { v: 1, janitor: { access_token: session.access_token, refresh_token: session.refresh_token, expires_at: session.expires_at, apikey } };
+        }
+        const json = JSON.stringify(payload);
+        let data;
+        if (window.CompressionStream) {
+            /* Characters with lorebooks can be large; gzip keeps the address short ("z." marks it). */
+            const buf = new Uint8Array(await new Response(new Blob([json]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer());
+            let bin = '';
+            for (let i = 0; i < buf.length; i += 32768) bin += String.fromCharCode.apply(null, buf.subarray(i, i + 32768));
+            data = 'z.' + btoa(bin);
+        } else {
+            data = btoa(unescape(encodeURIComponent(json)));
+        }
+        if (ST) {
+            say('Bot Bazaar: opening ' + ST.replace(/^https?:\/\//, '') + '…');
+            await new Promise(r => setTimeout(r, 700));
+            location.replace(ST + '/#botbazaar=' + encodeURIComponent(data));
+            return;
+        }
+        say('Bot Bazaar: copying…');
+        const out = 'bazaar:' + data;
+        if (navigator.clipboard) { navigator.clipboard.writeText(out).then(() => alert('Login copied. Paste it into Bot Bazaar.'), () => prompt('Copy this, then paste into Bot Bazaar:', out)); }
+        else { prompt('Copy this, then paste into Bot Bazaar:', out); }
+
+    };
+    try {
+        await run();
+    } catch (e) {
+        say('Bot Bazaar bookmark error: ' + ((e && e.message) || e) + ' (tell the developer)', true);
     }
-    const json = JSON.stringify(payload);
-    let data;
-    if (window.CompressionStream) {
-        /* Characters with lorebooks can be large; gzip keeps the address short ("z." marks it). */
-        const buf = new Uint8Array(await new Response(new Blob([json]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer());
-        let bin = '';
-        for (let i = 0; i < buf.length; i += 32768) bin += String.fromCharCode.apply(null, buf.subarray(i, i + 32768));
-        data = 'z.' + btoa(bin);
-    } else {
-        data = btoa(unescape(encodeURIComponent(json)));
-    }
-    if (ST) { location.replace(ST + '/#botbazaar=' + encodeURIComponent(data)); return; }
-    if (note) note.remove();
-    const out = 'bazaar:' + data;
-    if (navigator.clipboard) { navigator.clipboard.writeText(out).then(() => alert('Login copied. Paste it into Bot Bazaar.'), () => prompt('Copy this, then paste into Bot Bazaar:', out)); }
-    else { prompt('Copy this, then paste into Bot Bazaar:', out); }
 }
 
 const buildBookmarklet = () => {
     const code = botBazaarBookmark.toString();
     // Browsers remove line breaks from bookmarks, so a // comment would comment out everything after it.
     if (/(^|\n)\s*\/\/|[;{}]\s+\/\/ /.test(code)) console.error(TAG, 'The bookmark code contains a // comment and would break; use /* */ comments in botBazaarBookmark.');
-    return `javascript:(${code.replace(/[\r\n\t]+/g, ' ')})(${JSON.stringify(location.origin)});void 0`;
+    return `javascript:(${code.replace(/[\r\n\t]+/g, ' ').replace(/ {2,}/g, ' ')})(${JSON.stringify(location.origin)});void 0`;
 };
 
 /** Reads what the bookmark handed over: base64 JSON, or "z." + base64 gzip for bigger payloads. */
