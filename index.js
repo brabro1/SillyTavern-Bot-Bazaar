@@ -4097,6 +4097,7 @@ function closeBrowser() {
  * Written as a real function so buildBookmarklet() can stringify it faithfully — backslashes in its regexes stay intact.
  */
 async function botBazaarBookmark(ST) {
+    /* No // comments in here: browsers remove line breaks from bookmarks, so a // comment would swallow the rest of the code. */
     const CHUB = /(^|\.)(chub\.ai|characterhub\.org)$/.test(location.hostname);
     const JANITOR = /(^|\.)janitorai\.com$/.test(location.hostname);
     const SAUCEPAN = /(^|\.)saucepan\.ai$/.test(location.hostname);
@@ -4104,8 +4105,8 @@ async function botBazaarBookmark(ST) {
     let payload;
     let note = null;
     if (SAUCEPAN) {
-        // Saucepan only answers its own website, so the work happens here, with this tab's own login: the
-        // account, the bot (or lorebook) whose page this is, and the favorites. SillyTavern needs no setup for it.
+        /* Saucepan only answers its own website, so the work happens here, with this tab's own login: the */
+        /* account, the bot (or lorebook) whose page this is, and the favorites. SillyTavern needs no setup for it. */
         const key = localStorage.getItem('hallucination/auth_token') || '';
         if (!key) { alert('No Saucepan login found here. Sign in to saucepan.ai first.'); return; }
         note = document.createElement('div');
@@ -4125,8 +4126,8 @@ async function botBazaarBookmark(ST) {
         const u = me.data && (me.data.user || me.data);
         if (u && u.id) sauce.me = { id: u.id, handle: u.handle, is_verified: u.is_verified };
         const page = location.pathname.match(/\/(companion|lorebook)\/([0-9a-f-]{36})/i);
-        // Saucepan sends definitions to other apps only scrambled, but shows them on this page to you. So, like you
-        // would by hand, open the page's own "Definition → Show" and "View scenarios", and read what it displays.
+        /* Saucepan sends definitions to other apps only scrambled, but shows them on this page to you. So, like you */
+        /* would by hand, open the page's own "Definition → Show" and "View scenarios", and read what it displays. */
         const wait = ms => new Promise(r => setTimeout(r, ms));
         const reveal = async (button) => {
             const added = [];
@@ -4141,7 +4142,7 @@ async function botBazaarBookmark(ST) {
         };
         const readPage = async () => {
             const out = {};
-            // "Definition: Open — Show": the label has its own text plus the state inside it. Wait for the page to draw it.
+            /* "Definition: Open — Show": the label has its own text plus the state inside it. Wait for the page to draw it. */
             const findLabel = () => [].slice.call(document.querySelectorAll('body *')).find(e => [].slice.call(e.childNodes).some(n => n.nodeType === 3 && /^\s*Definition:?\s*$/.test(n.textContent)));
             let label = findLabel();
             for (let i = 0; i < 40 && !label; i++) { await wait(200); label = findLabel(); }
@@ -4191,7 +4192,7 @@ async function botBazaarBookmark(ST) {
             note.textContent = 'Bot Bazaar: getting this character…';
             const id = page[2];
             const c = await call('/api/v2/companions/' + id);
-            // The page description comes scrambled; Bot Bazaar doesn't use it, so leave it out.
+            /* The page description comes scrambled; Bot Bazaar doesn't use it, so leave it out. */
             if (c.data && c.data.companion) { delete c.data.companion.full_description_fragments; delete c.data.companion.starting_scenarios_fragments; }
             const d = await call('/api/v1/companion/definition?companion_id=' + id);
             const l = await call('/api/v2/companions/' + id + '/lorebooks');
@@ -4201,7 +4202,7 @@ async function botBazaarBookmark(ST) {
                 books.push({ meta: b, status: r.status, data: r.status === 200 ? r.data : null });
             }
             const titles = d.data && Array.isArray(d.data.sections) ? d.data.sections.map(s => s && s.title).filter(Boolean) : [];
-            // The scrambled copy isn't sent along; what the page showed is.
+            /* The scrambled copy isn't sent along; what the page showed is. */
             sauce.companion = { data: c.data, definition: { status: d.status, data: null, titles: titles, message: d.data && d.data.error ? d.data.error.message : '' }, shown: shown, books: books, booksStatus: l.status };
         } else if (page) {
             note.textContent = 'Bot Bazaar: getting this lorebook…';
@@ -4222,7 +4223,7 @@ async function botBazaarBookmark(ST) {
                     if (list.length < 24) break;
                 }
             }
-            // Only a complete list may replace the old one (otherwise favorites would vanish).
+            /* Only a complete list may replace the old one (otherwise favorites would vanish). */
             if (ok) sauce.favorites = favs;
         }
         note.textContent = 'Bot Bazaar: opening SillyTavern…';
@@ -4260,7 +4261,7 @@ async function botBazaarBookmark(ST) {
     const json = JSON.stringify(payload);
     let data;
     if (window.CompressionStream) {
-        // Characters with lorebooks can be large; gzip keeps the address short ("z." marks it).
+        /* Characters with lorebooks can be large; gzip keeps the address short ("z." marks it). */
         const buf = new Uint8Array(await new Response(new Blob([json]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer());
         let bin = '';
         for (let i = 0; i < buf.length; i += 32768) bin += String.fromCharCode.apply(null, buf.subarray(i, i + 32768));
@@ -4275,7 +4276,12 @@ async function botBazaarBookmark(ST) {
     else { prompt('Copy this, then paste into Bot Bazaar:', out); }
 }
 
-const buildBookmarklet = () => `javascript:(${botBazaarBookmark.toString()})(${JSON.stringify(location.origin)});void 0`;
+const buildBookmarklet = () => {
+    const code = botBazaarBookmark.toString();
+    // Browsers remove line breaks from bookmarks, so a // comment would comment out everything after it.
+    if (/(^|\n)\s*\/\/|[;{}]\s+\/\/ /.test(code)) console.error(TAG, 'The bookmark code contains a // comment and would break; use /* */ comments in botBazaarBookmark.');
+    return `javascript:(${code.replace(/[\r\n\t]+/g, ' ')})(${JSON.stringify(location.origin)});void 0`;
+};
 
 /** Reads what the bookmark handed over: base64 JSON, or "z." + base64 gzip for bigger payloads. */
 async function decodeHandoff(data) {
