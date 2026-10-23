@@ -4699,7 +4699,8 @@ async function importLogin(payload, { open = false } = {}) {
             access_token: payload.janitor.access_token,
             refresh_token: payload.janitor.refresh_token || '',
             expires_at: payload.janitor.expires_at,
-            apikey: payload.janitor.apikey || '',
+            /* If the bookmark couldn't read JanitorAI's public key this time, keep the one saved before (it rarely changes). */
+            apikey: payload.janitor.apikey || janitorSession()?.apikey || '',
         });
         syncState.janitor.at = 0;
         scheduleRefresh();
