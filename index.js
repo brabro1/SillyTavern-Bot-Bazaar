@@ -15,6 +15,7 @@
 
 import { deleteCharacter, processDroppedFiles } from '../../../../script.js';
 import { deleteWorldInfo } from '../../../world-info.js';
+import { BOOKMARK_VERSION, EXTENSION_VERSION, buildBookmarklet as makeBookmarklet, decodeHandoff, recordHandoff, deviceChecks, isPhone } from './connect.js?v=5.0.2';
 
 const TAG = '[Bot Bazaar]';
 const SITE = 'https://janitorai.com';
@@ -2439,7 +2440,9 @@ function buildUi() {
             showConnect();
         }
         if (action === 'resume') resume();
-        if (action === 'copycode') copyText(buildBookmarklet(), 'Button code copied.');
+        if (action === 'copycode') copyText(buildBookmarklet(), 'Bookmark code copied.');
+        if (action === 'copycode-bare') copyText(buildBookmarklet({ bare: true }), 'Copied. In the address bar type  javascript:  and paste.');
+        if (action === 'copy-check') copyText(deviceCheckText(), 'Check copied.');
         const copy = event.target.closest('[data-copy]');
         if (copy) copyText(copy.dataset.copy, 'Copied. Paste it in a terminal opened in your SillyTavern folder.');
     });
@@ -2664,70 +2667,112 @@ function hideViews() {
 let awaitingLogin = false;
 let lastClipboard = '';
 
+const check = (ok) => (ok === null ? ['jai_dim', 'fa-circle-question'] : ok ? ['jai_ok', 'fa-check'] : ['jai_bad', 'fa-triangle-exclamation']);
+
+/** What this device can do for the hand-over, as a list the person can read (and send to the developer). */
+function deviceCheckHtml() {
+    const rows = deviceChecks({ proxy: sauceProxyOk });
+    return `
+        <ul class="jai_checks">${rows.map(([ok, label, hint]) => {
+            const [cls, icon] = check(ok);
+            return `<li class="${cls}"><i class="fa-solid ${icon}"></i><span>${esc(label)}${ok === false ? `<small>${esc(hint)}</small>` : ''}</span></li>`;
+        }).join('')}</ul>
+        <p class="jai_note">Bot Bazaar ${esc(EXTENSION_VERSION)} · bookmark ${BOOKMARK_VERSION}</p>
+        ${actions(button('copy-check', 'fa-copy', 'Copy this check'))}`;
+}
+
+function deviceCheckText() {
+    return [`Bot Bazaar ${EXTENSION_VERSION}, bookmark ${BOOKMARK_VERSION}`, navigator.userAgent,
+        ...deviceChecks({ proxy: sauceProxyOk }).map(([ok, label]) => `${ok === null ? '?' : ok ? 'OK' : 'NO'}  ${label}`)].join('\n');
+}
+
+/** How to get the bookmark (or its no-bookmark twin) onto this device. Shared by every screen that needs it. */
+function bookmarkHelp() {
+    const phone = isPhone();
+    const steps = phone ? `
+        <ol class="jai_steps">
+            <li>${button('copycode', 'fa-copy', 'Copy bookmark code')}</li>
+            <li>In your browser, bookmark any page (menu <b>⋮</b> → <b>☆</b>). Then open <b>⋮ → Bookmarks</b>, press and hold that bookmark and choose <b>Edit</b>. Name it <b>bazaar</b>, delete its address, paste the code, save.</li>
+            <li>Open the site (signed in), tap the address bar, type <b>bazaar</b> and tap the bookmark in the suggestions. <span class="jai_note">(Android Chrome only runs it from the address bar, not from the bookmarks list.)</span></li>
+        </ol>
+        <p><b>No bookmark at all:</b> ${button('copycode-bare', 'fa-copy', 'Copy code for the address bar')}</p>
+        <p class="jai_note">Open the signed-in site, tap the address bar, type <b>javascript:</b> yourself, paste, press Go. (Chrome removes the word "javascript:" from pasted text, so it has to be typed.) Nothing is saved, so repeat it when you want to bring in another bot.</p>`
+        : `
+        <ul>
+            <li>Press <b>Ctrl+Shift+B</b> to show the bookmarks bar, then drag this onto it: <a class="jai_bookmarklet" href="${esc(buildBookmarklet())}" title="Drag me to the bookmarks bar">Bot Bazaar</a></li>
+            <li>On the site (signed in), press it. A sheet appears at the bottom of the page and opens SillyTavern.</li>
+            <li>For a phone, open Bot Bazaar on the phone and make the bookmark there (this one only knows this computer's address).</li>
+        </ul>`;
+    return `
+        <details class="jai_bm" ${settings().bookmarkSeen && !phone ? '' : 'open'}>
+            <summary><b>Set up the bookmark</b> (once, on the device you are using)</summary>
+            ${steps}
+            <p class="jai_note">It opens SillyTavern at <b>${esc(location.origin)}</b>. A sheet at the bottom of the site's page shows what it is doing and has <b>Open SillyTavern</b>, <b>Copy code</b> and <b>Change address</b> buttons, so a wrong address or a blocked jump can be fixed on the spot.</p>
+        </details>`;
+}
+
 function showConnect(reason = '') {
     hideViews();
     awaitingLogin = true;
     const { token, expired, minutesLeft } = account();
     const chub = chubAccount();
-    const janitorState = bridgeVersion
-        ? '<span class="jai_ok"><i class="fa-solid fa-check"></i> helper script</span>'
-        : (token && !expired
-            ? `<span class="jai_ok"><i class="fa-solid fa-check"></i> connected · ${minutesLeft >= 120 ? `~${Math.round(minutesLeft / 60)} h` : `${Math.max(minutesLeft ?? 0, 1)} min`} left</span>`
-            : `<span class="jai_bad">${expired ? 'login expired' : 'not connected'}</span>`);
     const sauce = sauceAccount();
+    const ok = (text) => `<span class="jai_ok"><i class="fa-solid fa-check"></i> ${text}</span>`;
+    const janitorState = bridgeVersion
+        ? ok('helper script')
+        : (token && !expired
+            ? ok(`connected · ${minutesLeft >= 120 ? `~${Math.round(minutesLeft / 60)} h` : `${Math.max(minutesLeft ?? 0, 1)} min`} left${account().canRefresh ? ', renews itself' : ''}`)
+            : `<span class="jai_bad">${expired ? 'login expired' : 'not connected'}</span>`);
     const sauceState = sauce.token
         ? `<span class="${sauce.verified ? 'jai_ok' : 'jai_bad'}"><i class="fa-solid fa-check"></i> connected${sauce.user ? ` as @${esc(sauce.user)}` : ''}${sauce.verified ? '' : ' · email not verified'}</span>`
         : '<span class="jai_bad">not connected</span>';
-    const chubState = chub.key
-        ? `<span class="jai_ok"><i class="fa-solid fa-check"></i> connected${chub.user ? ` as @${esc(chub.user)}` : ''}</span>`
-        : '<span class="jai_bad">not connected</span>';
-    const steps = (site, openAction) => `
-        <ol class="jai_steps">
-            <li>${button(openAction, 'fa-up-right-from-square', `Open ${site}`)} <span>and sign in.</span></li>
-            <li>Press the <b>Bot Bazaar</b> bookmark on that page.</li>
-            <li>Come back here — it connects by itself.</li>
-        </ol>`;
+    const chubState = chub.key ? ok(`connected${chub.user ? ` as @${esc(chub.user)}` : ''}`) : '<span class="jai_bad">not connected</span>';
+    const phone = isPhone();
     showMessage(`
         <h3>Accounts</h3>
         ${reason ? `<p class="jai_bad"><i class="fa-solid fa-circle-info"></i> ${esc(reason)}</p>` : ''}
         <div class="jai_acc_grid">
             <div class="jai_acc">
                 <div class="jai_acc_head"><b>JanitorAI</b> ${janitorState}</div>
-                <p class="jai_note">For search, definitions, lorebooks and your JanitorAI favorites. A JanitorAI login lasts about 3 hours, then repeat steps 2–3.</p>
-                ${steps('JanitorAI', 'open')}
+                <p class="jai_note">For search, definitions, lorebooks and your favorites. Connect once: Bot Bazaar then renews the login by itself.</p>
+                ${button('open', 'fa-up-right-from-square', 'Open JanitorAI')}
                 ${token ? '<span class="jai_link" data-jai="disconnect">Disconnect JanitorAI</span>' : ''}
             </div>
             <div class="jai_acc">
                 <div class="jai_acc_head"><b>Chub</b> ${chubState}</div>
-                <p class="jai_note">Only for your Chub favorites — browsing Chub never needs it. Connect once; it doesn't expire.</p>
-                ${steps('Chub', 'open-chub')}
+                <p class="jai_note">Only for your Chub favorites — browsing Chub never needs it. It doesn't expire.</p>
+                ${button('open-chub', 'fa-up-right-from-square', 'Open Chub')}
                 ${chub.key ? '<span class="jai_link" data-jai="disconnect-chub">Disconnect Chub</span>' : ''}
             </div>
             <div class="jai_acc">
                 <div class="jai_acc_head"><b>Saucepan</b> ${sauceState}</div>
-                <p class="jai_note">For search, lorebooks and your Saucepan favorites. Pressed on a bot's Saucepan page, the bookmark also brings that bot here, ready to import — no setup needed.${sauce.token && !sauce.verified ? ' <b>Saucepan only sends definitions to accounts with a verified email</b> — verify yours on saucepan.ai.' : ''}</p>
-                ${steps('Saucepan', 'open-sauce')}
+                <p class="jai_note">For search, lorebooks and favorites. Pressed on a bot's page, the bookmark also brings that bot here, ready to import.${sauce.token && !sauce.verified ? ' <b>Saucepan only sends definitions to accounts with a verified email.</b>' : ''}</p>
+                ${button('open-sauce', 'fa-up-right-from-square', 'Open Saucepan')}
                 ${sauce.token ? '<span class="jai_link" data-jai="disconnect-sauce">Disconnect Saucepan</span>' : ''}
             </div>
         </div>
-        <details class="jai_bm" ${settings().bookmarkSeen ? '' : 'open'}>
-            <summary><b>First time:</b> add the Bot Bazaar bookmark (one button for every site)</summary>
-            <ul>
-                <li><b>Computer:</b> press <b>Ctrl+Shift+B</b> to show the bookmarks bar, then drag this onto it: <a class="jai_bookmarklet" href="${esc(buildBookmarklet())}" title="Drag me to the bookmarks bar">Bot Bazaar</a></li>
-                <li><b>Phone:</b> ${button('copycode', 'fa-copy', 'Copy bookmark code')} then bookmark any page, edit that bookmark, paste the code as its address and name it <b>bazaar</b>. On JanitorAI, Chub or Saucepan, type <b>bazaar</b> in the address bar and tap the bookmark.</li>
-                <li class="jai_note">This bookmark opens SillyTavern at <b>${esc(location.origin)}</b>, so make it on the phone itself, from the SillyTavern address the phone uses (a bookmark copied from another device opens the wrong address). While it runs you'll see an orange message at the top of the page; a red one means something went wrong and says what.</li>
-            </ul>
-            <p class="jai_note">Added the bookmark before? Replace it with this one — it now works on Saucepan too.</p>
-        </details>
-        <details>
-            <summary>It didn't connect by itself?</summary>
-            <p class="jai_note">Some browsers (mostly on phones) don't let pages read what you copied. Paste it here instead:</p>
-            <textarea id="jai_token" class="text_pole" rows="2" spellcheck="false" placeholder="Paste what the Bot Bazaar bookmark copied"></textarea>
+        <div class="jai_acc jai_how">
+            <div class="jai_acc_head"><b>How to connect</b></div>
+            <ol class="jai_steps">
+                <li>Open the site above and <b>sign in</b> (the website itself, not an app).</li>
+                <li>Run the <b>bazaar</b> bookmark there. A sheet appears at the bottom of the page.</li>
+                <li>Tap <b>Open SillyTavern</b> if it doesn't jump by itself. You come back here, connected.</li>
+            </ol>
+            <p class="jai_note">Why a bookmark? The sites only accept sign-ins on their own pages (JanitorAI even asks for a captcha), so the login has to be read there and carried here.</p>
+        </div>
+        ${bookmarkHelp()}
+        <details ${phone ? 'open' : ''}>
+            <summary><b>Have a code?</b> Paste it here</summary>
+            <p class="jai_note">The sheet's <b>Copy code</b> button copies it. This works on every browser, even when the jump doesn't.</p>
+            <textarea id="jai_token" class="text_pole" rows="3" spellcheck="false" autocapitalize="off" autocomplete="off" placeholder="bazaar:…"></textarea>
             ${actions(button('save', 'fa-plug', 'Connect'), button('paste', 'fa-paste', 'Paste & connect'))}
         </details>
         <details>
-            <summary>Never copy anything (computer, JanitorAI only)</summary>
-            <p>With the helper script the extension uses your open JanitorAI tab directly, so nothing expires and nothing is copied:</p>
+            <summary>Check this device</summary>
+            ${deviceCheckHtml()}
+        </details>
+        <details>
+            <summary>Computer only: never copy anything (JanitorAI helper script)</summary>
             <ol>
                 <li>Install <a href="https://www.tampermonkey.net/" target="_blank" rel="noopener">Tampermonkey</a>.</li>
                 <li>Right-click the Tampermonkey icon → <b>Manage extension</b> → switch on <b>Allow User Scripts</b>.</li>
@@ -2736,6 +2781,8 @@ function showConnect(reason = '') {
         </details>
         ${actions(button('resume', 'fa-arrow-left', 'Back'))}
         <p class="jai_note">Your logins are saved in SillyTavern and this browser, and sent only to janitorai.com, chub.ai and saucepan.ai — never share them.</p>`);
+    const pasteBox = $('#jai_token');
+    pasteBox?.addEventListener('input', () => { if (/bazaar:\S{40,}/.test(pasteBox.value)) saveToken(); });
     $('#jai_message').querySelector('.jai_bm')?.addEventListener('toggle', () => {
         settings().bookmarkSeen = true;
         ctx().saveSettingsDebounced();
@@ -2753,6 +2800,10 @@ async function checkClipboardForLogin() {
     }
     if (!text || text === lastClipboard) return;
     lastClipboard = text;
+    if (/bazaar:/.test(text)) {
+        $('#jai_token').value = text;
+        return saveToken();
+    }
     const jwt = extractToken(text);
     const chubKey = extractChubKey(text);
     if ((!jwt && !chubKey) || (jwt && jwt === account().token) || (chubKey && chubKey === chubAccount().key)) return;
@@ -2772,17 +2823,19 @@ async function pasteToken() {
     } catch {
         return toastr.warning('The browser did not allow reading the clipboard. Paste the token into the box and press Connect.', 'Bot Bazaar');
     }
-    if (!extractToken(text) && !extractChubKey(text)) return toastr.warning('The clipboard does not contain a JanitorAI token or Chub key. Press the token bookmark on the JanitorAI or Chub tab first.', 'Bot Bazaar');
+    if (!extractToken(text) && !extractChubKey(text) && !/bazaar:/.test(text)) return toastr.warning('The clipboard does not contain a JanitorAI token or Chub key. Press the token bookmark on the JanitorAI or Chub tab first.', 'Bot Bazaar');
     $('#jai_token').value = text;
     await saveToken();
 }
 
 async function saveToken() {
-    const bazaar = $('#jai_token').value.trim().match(/bazaar:([A-Za-z0-9+/=_.-]+)/);
+    const bazaar = $('#jai_token').value.trim().match(/bazaar:([\s\S]+)/);
     if (bazaar) {
         showMessage('<i class="fa-solid fa-spinner fa-spin"></i> Connecting…');
-        const done = await importLogin(await decodeHandoff(bazaar[1]));
-        return done.length ? showConnect() : showConnect('That was not a valid Bot Bazaar login. Press the bookmark again.');
+        const { payload, error, size } = await decodeHandoff(bazaar[1]);
+        const done = payload ? await receiveHandoff(payload, 'paste', size, false) : [];
+        if (!payload) recordHandoff({ ok: false, via: 'paste', error });
+        return done.length ? showConnect() : showConnect(error || 'That code held no login that could be used. Run the bookmark again.');
     }
     const chubKey = extractChubKey($('#jai_token').value);
     if (chubKey) {
@@ -4104,15 +4157,7 @@ function showSauceSetup() {
                 <li>You land back here on that bot — tap <b>Import</b>. Its picture, tags and lorebooks come along.</li>
             </ol>
             <p class="jai_note">Every press also brings your Saucepan favorites into <b>Favorites</b>${settings().sauceFavsAt ? ` (last time ${esc(timeAgo(new Date(settings().sauceFavsAt).toISOString()))})` : ''}. You can also paste a Saucepan link in the search box above to see a bot's page and comments here.${sauce.token ? '' : ' Pressing it the first time also connects your account.'}</p>
-            <details class="jai_bm" ${settings().bookmarkSeen ? '' : 'open'}>
-                <summary>Don't have the bookmark yet?</summary>
-                <ul>
-                    <li><b>Computer:</b> press <b>Ctrl+Shift+B</b> to show the bookmarks bar, then drag this onto it: <a class="jai_bookmarklet" href="${esc(buildBookmarklet())}" title="Drag me to the bookmarks bar">Bot Bazaar</a></li>
-                    <li><b>Phone:</b> ${button('copycode', 'fa-copy', 'Copy bookmark code')} then bookmark any page, edit that bookmark, paste the code as its address and name it <b>bazaar</b>. On Saucepan, type <b>bazaar</b> in the address bar and tap the bookmark.</li>
-                    <li class="jai_note">This bookmark opens SillyTavern at <b>${esc(location.origin)}</b> — make it on the device you'll use it on. An orange message at the top of the page means it's working; a red one says what went wrong.</li>
-                </ul>
-                <p class="jai_note">Added it before? Replace it with this one — older copies only connect your login.</p>
-            </details>
+            ${bookmarkHelp()}
             <details>
                 <summary>Optional: browse and search Saucepan right here too</summary>
                 <p>That needs SillyTavern's built-in proxy switched on once. Run one line in your SillyTavern folder, then restart SillyTavern:</p>
@@ -4438,12 +4483,14 @@ async function openSauceLorebook(id) {
     });
 }
 
-async function openBrowser() {
+/** Opens Bot Bazaar. Given a text, it opens on the Accounts screen with that text as the reason instead of the list. */
+async function openBrowser(reason) {
     if (!root) buildUi();
     await Promise.all([loadFavorites(), loadSessionFile()]);
     root.classList.add('jai_open');
     await detectBridge();
     updateStatus();
+    if (typeof reason === 'string') return showConnect(reason);
     if (!$('#jai_grid').children.length && !state.detail) loadList();
 }
 
@@ -4455,240 +4502,8 @@ function closeBrowser() {
 
 // ---------------------------------------------------------------------------------------------- entry points
 
-/*
- * The one bookmark. Pressed on a signed-in JanitorAI or Chub tab, it collects the login this browser already holds
- * and hands it straight to SillyTavern through the page URL's #fragment (which browsers never send to any server).
- * This replaces copy-and-paste, which some phone browsers block. For JanitorAI it also captures the refresh token
- * and the site's public key, so Bot Bazaar can keep the login current by itself.
- *
- * Written as a real function so buildBookmarklet() can stringify it faithfully — backslashes in its regexes stay intact.
- */
-async function botBazaarBookmark(ST) {
-    /* No // comments in here: browsers remove line breaks from bookmarks, so a // comment would swallow the rest of the code. */
-    let note = null;
-    const say = (text, bad) => {
-        try {
-            if (!note) {
-                note = document.createElement('div');
-                note.style.cssText = 'position:fixed;z-index:2147483647;left:50%;top:16px;max-width:90vw;transform:translateX(-50%);color:#fff;padding:10px 18px;border-radius:18px;font:600 14px sans-serif;text-align:center;box-shadow:0 6px 20px rgba(0,0,0,.4)';
-                (document.body || document.documentElement).appendChild(note);
-            }
-            note.style.background = bad ? '#c0392b' : '#ff6a3d';
-            note.textContent = text;
-        } catch (e) { /* no page to draw on */ }
-    };
-    const run = async () => {
-        const CHUB = /(^|\.)(chub\.ai|characterhub\.org)$/.test(location.hostname);
-        const JANITOR = /(^|\.)janitorai\.com$/.test(location.hostname);
-        const SAUCEPAN = /(^|\.)saucepan\.ai$/.test(location.hostname);
-        if (!CHUB && !JANITOR && !SAUCEPAN) { alert('Open janitorai.com, chub.ai or saucepan.ai (signed in) first, then press this.'); return; }
-        let payload;
-        if (SAUCEPAN) {
-            /* Saucepan only answers its own website, so the work happens here, with this tab's own login: the */
-            /* account, the bot (or lorebook) whose page this is, and the favorites. SillyTavern needs no setup for it. */
-            const key = localStorage.getItem('hallucination/auth_token') || '';
-            if (!key) { alert('No Saucepan login found here. Sign in to saucepan.ai first.'); return; }
-            say('Bot Bazaar: connecting…');
-            const H = { Authorization: 'Bearer ' + key, 'cf-edge-token-8af3': 'e3b0c44298fc1c14' };
-            const call = async (path, body) => {
-                try {
-                    const r = await fetch(path, body ? { method: 'POST', headers: Object.assign({ 'Content-Type': 'application/json' }, H), body: JSON.stringify(body) } : { headers: H });
-                    const d = await r.json().catch(() => null);
-                    return { status: r.status, data: d };
-                } catch (e) { return { status: 0, data: null }; }
-            };
-            const sauce = {};
-            const me = await call('/api/v1/users/me');
-            const u = me.data && (me.data.user || me.data);
-            if (u && u.id) sauce.me = { id: u.id, handle: u.handle, is_verified: u.is_verified };
-            const page = location.pathname.match(/\/(companion|lorebook)\/([0-9a-f-]{36})/i);
-            /* Saucepan sends definitions to other apps only scrambled, but shows them on this page to you. So, like you */
-            /* would by hand, open the page's own "Definition → Show" and "View scenarios", and read what it displays. */
-            const wait = ms => new Promise(r => setTimeout(r, ms));
-            const reveal = async (button) => {
-                const added = [];
-                const mo = new MutationObserver(ms => ms.forEach(m => m.addedNodes.forEach(x => { if (x.nodeType === 1) added.push(x); })));
-                mo.observe(document.body, { childList: true, subtree: true });
-                button.click();
-                for (let i = 0; i < 20 && !added.some(x => x.innerText && x.innerText.length > 40); i++) await wait(150);
-                await wait(300);
-                mo.disconnect();
-                const top = added.filter(x => x.isConnected && !added.some(o => o !== x && o.contains(x)));
-                return top.sort((a, b) => b.innerText.length - a.innerText.length)[0] || null;
-            };
-            const readPage = async () => {
-                const out = {};
-                /* "Definition: Open — Show": the label has its own text plus the state inside it. Wait for the page to draw it. */
-                const findLabel = () => [].slice.call(document.querySelectorAll('body *')).find(e => [].slice.call(e.childNodes).some(n => n.nodeType === 3 && /^\s*Definition:?\s*$/.test(n.textContent)));
-                let label = findLabel();
-                for (let i = 0; i < 40 && !label; i++) { await wait(200); label = findLabel(); }
-                let btn = null;
-                for (let n = label, i = 0; n && i < 5 && !btn; i++) {
-                    n = n.parentElement;
-                    btn = n && [].slice.call(n.querySelectorAll('button')).find(b => /^(show|hide)$/i.test(b.innerText.trim()));
-                }
-                if (btn) {
-                    if (/hide/i.test(btn.innerText)) { btn.click(); await wait(500); }
-                    const box = await reveal(btn);
-                    if (box) out.definition = box.innerText;
-                    btn.click();
-                }
-                const scen = [].slice.call(document.querySelectorAll('button')).find(b => /^view .*scenarios?$/i.test(b.innerText.trim()));
-                if (scen) {
-                    const dialog = await reveal(scen);
-                    const list = [];
-                    let persona = '';
-                    for (let i = 0; dialog && i < 30; i++) {
-                        const text = dialog.innerText;
-                        const m = text.match(/Scenario (\d+) of (\d+)\n/);
-                        if (!m) break;
-                        const lines = text.split('\n');
-                        const end = text.indexOf('\nPrev\n', m.index);
-                        const msg = text.slice(m.index + m[0].length, end > 0 ? end : undefined).trim();
-                        const head = text.slice(0, m.index).split('\n').filter(l => l.trim() && !/can be edited/i.test(l));
-                        const pi = lines.lastIndexOf('Start Chat');
-                        if (pi > 0) persona = lines[pi - 1].trim();
-                        list.push({ title: head[head.length - 1] || '', message: msg });
-                        if (Number(m[1]) >= Number(m[2])) break;
-                        const next = [].slice.call(dialog.querySelectorAll('button')).find(b => b.innerText.trim() === 'Next');
-                        if (!next) break;
-                        next.click();
-                        for (let k = 0; k < 20 && dialog.innerText.indexOf('Scenario ' + (Number(m[1]) + 1) + ' of') < 0; k++) await wait(100);
-                    }
-                    out.scenarios = list;
-                    out.persona = persona;
-                    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-                }
-                return out;
-            };
-            if (page && page[1].toLowerCase() === 'companion') {
-                say('Bot Bazaar: reading this character…');
-                let shown = {};
-                try { shown = await readPage(); } catch (e) { /* the page didn't show it; the rest still comes */ }
-                say('Bot Bazaar: getting this character…');
-                const id = page[2];
-                const c = await call('/api/v2/companions/' + id);
-                /* The page description comes scrambled; Bot Bazaar doesn't use it, so leave it out. */
-                if (c.data && c.data.companion) { delete c.data.companion.full_description_fragments; delete c.data.companion.starting_scenarios_fragments; }
-                const d = await call('/api/v1/companion/definition?companion_id=' + id);
-                const l = await call('/api/v2/companions/' + id + '/lorebooks');
-                const books = [];
-                for (const b of (l.data && l.data.lorebooks) || []) {
-                    const r = await call('/api/v1/lorebooks/' + b.id);
-                    books.push({ meta: b, status: r.status, data: r.status === 200 ? r.data : null });
-                }
-                const titles = d.data && Array.isArray(d.data.sections) ? d.data.sections.map(s => s && s.title).filter(Boolean) : [];
-                /* The scrambled copy isn't sent along; what the page showed is. */
-                sauce.companion = { data: c.data, definition: { status: d.status, data: null, titles: titles, message: d.data && d.data.error ? d.data.error.message : '' }, shown: shown, books: books, booksStatus: l.status };
-            } else if (page) {
-                say('Bot Bazaar: getting this lorebook…');
-                const r = await call('/api/v1/lorebooks/' + page[2]);
-                sauce.lorebook = { id: page[2], status: r.status, data: r.status === 200 ? r.data : null };
-            }
-            if (sauce.me) {
-                say('Bot Bazaar: getting your favorites…');
-                const favs = [];
-                let ok = true;
-                const pages = [['/api/v1/search', 'companions', 'character', { special_view: { view: 'favorites' } }], ['/api/v1/search/favorited-lorebooks', 'lorebooks', 'lorebook', {}]];
-                for (const [path, field, kind, extra] of pages) {
-                    for (let o = 0; o < 960; o += 24) {
-                        const r = await call(path, Object.assign({ order_by: 'favorited_at', asc: false, offset: o, limit: 24, sus: true }, extra));
-                        const list = r.data && r.data[field];
-                        if (r.status !== 200 || !Array.isArray(list)) { if (kind === 'character') ok = false; break; }
-                        list.forEach(x => favs.push({ id: x.id, kind: kind, name: x.display_name || x.name, image: kind === 'character' ? (x.image && x.image.id) : x.image_id, creator: x.author_handle || x.owner_handle, creatorId: x.author_id || x.owner_id }));
-                        if (list.length < 24) break;
-                    }
-                }
-                /* Only a complete list may replace the old one (otherwise favorites would vanish). */
-                if (ok) sauce.favorites = favs;
-            }
-            say('Bot Bazaar: opening SillyTavern…');
-            payload = { v: 1, saucepan: key, sauce: sauce };
-        } else if (CHUB) {
-            say('Bot Bazaar: reading your Chub login…');
-            let key = localStorage.getItem('URQL_TOKEN') || '';
-            try { const parsed = JSON.parse(key); if (typeof parsed === 'string') key = parsed; } catch (e) { /* already plain */ }
-            if (!key) { alert('No Chub login found here. Sign in to chub.ai first.'); return; }
-            payload = { v: 1, chub: key };
-        } else {
-            say('Bot Bazaar: reading your JanitorAI login…');
-            const decode = (s) => {
-                try { s = decodeURIComponent(s); } catch (e) { /* already decoded */ }
-                const m = s.match(/base64-([\w+/=-]+)/);
-                if (m) { try { return atob(m[1].replace(/-/g, '+').replace(/_/g, '/')); } catch (e) { /* not base64 */ } }
-                return s;
-            };
-            const cookies = {};
-            document.cookie.split(';').map(p => p.trim()).forEach((p) => { const i = p.indexOf('='); if (i > 0) cookies[p.slice(0, i)] = p.slice(i + 1); });
-            const groups = {};
-            Object.keys(cookies).filter(k => /auth-token/i.test(k)).sort().forEach((k) => { const base = k.replace(/\.\d+$/, ''); groups[base] = (groups[base] || '') + cookies[k]; });
-            const candidates = Object.values(groups);
-            for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); if (/auth-token|^sb-/i.test(k)) candidates.push(localStorage.getItem(k)); }
-            let session = null;
-            for (const raw of candidates) { try { const o = JSON.parse(decode(raw)); if (o && o.access_token && o.refresh_token) { session = o; break; } } catch (e) { /* skip */ } }
-            if (!session) { alert('No JanitorAI login found here. Sign in to janitorai.com first.'); return; }
-            let apikey = '';
-            try {
-                const src = [].slice.call(document.querySelectorAll('script[src]')).map(s => s.src).filter(s => /index-.*\.js/.test(s))[0];
-                const txt = await (await fetch(src)).text();
-                const jwts = txt.match(/eyJ[\w-]+\.eyJ[\w-]+\.[\w-]+/g) || [];
-                apikey = jwts.filter((j) => { try { return JSON.parse(atob(j.split('.')[1].replace(/-/g, '+').replace(/_/g, '/'))).role === 'anon'; } catch (e) { return false; } })[0] || '';
-            } catch (e) { /* no renewal key; the login still works until it expires */ }
-            payload = { v: 1, janitor: { access_token: session.access_token, refresh_token: session.refresh_token, expires_at: session.expires_at, apikey } };
-        }
-        const json = JSON.stringify(payload);
-        let data;
-        if (window.CompressionStream) {
-            /* Characters with lorebooks can be large; gzip keeps the address short ("z." marks it). */
-            const buf = new Uint8Array(await new Response(new Blob([json]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer());
-            let bin = '';
-            for (let i = 0; i < buf.length; i += 32768) bin += String.fromCharCode.apply(null, buf.subarray(i, i + 32768));
-            data = 'z.' + btoa(bin);
-        } else {
-            data = btoa(unescape(encodeURIComponent(json)));
-        }
-        if (ST) {
-            say('Bot Bazaar: opening ' + ST.replace(/^https?:\/\//, '') + '…');
-            await new Promise(r => setTimeout(r, 700));
-            location.replace(ST + '/#botbazaar=' + encodeURIComponent(data));
-            return;
-        }
-        say('Bot Bazaar: copying…');
-        const out = 'bazaar:' + data;
-        if (navigator.clipboard) { navigator.clipboard.writeText(out).then(() => alert('Login copied. Paste it into Bot Bazaar.'), () => prompt('Copy this, then paste into Bot Bazaar:', out)); }
-        else { prompt('Copy this, then paste into Bot Bazaar:', out); }
-
-    };
-    try {
-        await run();
-    } catch (e) {
-        say('Bot Bazaar bookmark error: ' + ((e && e.message) || e) + ' (tell the developer)', true);
-    }
-}
-
-const buildBookmarklet = () => {
-    const code = botBazaarBookmark.toString();
-    // Browsers remove line breaks from bookmarks, so a // comment would comment out everything after it.
-    if (/(^|\n)\s*\/\/|[;{}]\s+\/\/ /.test(code)) console.error(TAG, 'The bookmark code contains a // comment and would break; use /* */ comments in botBazaarBookmark.');
-    return `javascript:(${code.replace(/[\r\n\t]+/g, ' ').replace(/ {2,}/g, ' ')})(${JSON.stringify(location.origin)});void 0`;
-};
-
-/** Reads what the bookmark handed over: base64 JSON, or "z." + base64 gzip for bigger payloads. */
-async function decodeHandoff(data) {
-    try {
-        let text = str(data);
-        try { text = decodeURIComponent(text); } catch { /* already decoded */ }
-        if (text.startsWith('z.')) {
-            const bytes = Uint8Array.from(atob(text.slice(2)), ch => ch.charCodeAt(0));
-            const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
-            return JSON.parse(await new Response(stream).text());
-        }
-        return JSON.parse(decodeURIComponent(escape(atob(text))));
-    } catch (error) {
-        console.warn(TAG, 'Could not read the bookmark handoff', error);
-        return null;
-    }
-}
+/** The bookmark for this SillyTavern address (see connect.js). */
+const buildBookmarklet = (options) => makeBookmarklet(location.origin, options);
 
 /** Applies a captured login. Returns the sites it connected. */
 async function importLogin(payload, { open = false } = {}) {
@@ -4765,12 +4580,40 @@ async function importLogin(payload, { open = false } = {}) {
     return connected.length || !sauce ? connected : ['Saucepan'];
 }
 
+/**
+ * Runs a hand-over (from the address or from pasted text), tells the person what happened and keeps a note of it
+ * for the device check. Returns the sites that were connected.
+ */
+async function receiveHandoff(payload, via, size, open) {
+    let sites = [];
+    try {
+        sites = await importLogin(payload, { open });
+    } catch (error) {
+        console.warn(TAG, error);
+        recordHandoff({ ok: false, via, size, error: `Bot Bazaar could not use it: ${error.message}` });
+        toastr.error(`The login arrived but could not be saved: ${error.message}`, 'Bot Bazaar', { timeOut: 20000 });
+        return sites;
+    }
+    const ok = sites.length > 0;
+    recordHandoff({ ok, via, size, sites, bv: payload?.bv || 0, error: ok ? '' : 'The code held no login that could be used.' });
+    if (ok && (payload?.bv || 0) < BOOKMARK_VERSION) {
+        toastr.info('Your Bot Bazaar bookmark is an older version. Replace it (Accounts → Set up the bookmark) so it shows progress and can fix the address by itself.', 'Bot Bazaar', { timeOut: 15000 });
+    }
+    return sites;
+}
+
 /** On load, pick up a login the bookmark handed over through the URL fragment, then clear it from the URL. */
-function handleHandoff() {
+async function handleHandoff() {
     const match = location.hash.match(/botbazaar=([^&]*)/);
     if (!match) return;
     try { history.replaceState(null, '', location.pathname + location.search); } catch { /* ignore */ }
-    decodeHandoff(match[1]).then(payload => payload && importLogin(payload, { open: true }));
+    const { payload, error, size } = await decodeHandoff(match[1]);
+    if (!payload) {
+        recordHandoff({ ok: false, via: 'link', error });
+        toastr.error(error, 'Bot Bazaar', { timeOut: 25000 });
+        return openBrowser(error);
+    }
+    await receiveHandoff(payload, 'link', size, true);
 }
 
 function addButtons() {
@@ -4799,6 +4642,8 @@ function addButtons() {
 jQuery(() => {
     addButtons();
     handleHandoff();
+    // The same page can be asked again without reloading (the address only changes after the #), e.g. from a second tab.
+    window.addEventListener('hashchange', handleHandoff);
     syncSessionOnStart();
     console.info(TAG, 'loaded');
 });

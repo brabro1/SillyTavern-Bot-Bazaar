@@ -77,13 +77,22 @@ page and comments too.
 
 ## Connecting your accounts
 
-JanitorAI, Chub and Saucepan don't let other apps sign you in, so Bot Bazaar borrows the login your browser already has —
-with **one bookmark**, and **no copy-paste**:
+JanitorAI, Chub and Saucepan only accept sign-ins on their own pages (JanitorAI even asks for a captcha that only works
+on janitorai.com), so Bot Bazaar borrows the login your browser already has, with **one bookmark**:
 
-1. One-time: in **Account**, add the **Bot Bazaar** bookmark (computer: drag it to the bookmarks bar; phone:
-   **Copy bookmark code**, then make a bookmark named `bazaar` with that code as its address).
-2. Open JanitorAI, Chub or Saucepan (signed in) and press the bookmark.
-3. It jumps straight back to SillyTavern and connects by itself — nothing to paste. Works on Android Chrome.
+1. One-time: in **Accounts → Set up the bookmark**, add the **Bot Bazaar** bookmark (computer: drag it to the bookmarks
+   bar; phone: **Copy bookmark code**, make a bookmark named `bazaar` with that code as its address).
+   No bookmark? **Copy code for the address bar**, then on the site type `javascript:` and paste.
+2. Open JanitorAI, Chub or Saucepan (signed in) and run it.
+3. A **sheet appears at the bottom of the page** and shows what it is doing. When it says *Done*, it opens
+   SillyTavern by itself, or you tap **Open SillyTavern**. The sheet also has **Copy code** (then paste into
+   Accounts → *Have a code?*, which works in every browser) and **Change address** (if the bookmark was made on another
+   device, fix the SillyTavern address right there). Any failure is written out in red with a **Copy details** button.
+
+**If it doesn't work on a phone:** open **Accounts → Check this device**. It lists what the browser can do, the
+SillyTavern address the bookmark will use, and what the last hand-over did (or that none arrived).
+Android Chrome only runs a `javascript:` bookmark from the address bar (type `bazaar`, tap the bookmark in the
+suggestions), not from the bookmarks list, and the bookmark must be made on the phone itself.
 
 The login is handed over inside the page URL's `#` fragment, which browsers never send to any server, and is
 cleared from the address bar immediately. (If you ever need it, the Account panel still has a manual paste box.)
