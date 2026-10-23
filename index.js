@@ -15,7 +15,7 @@
 
 import { deleteCharacter, processDroppedFiles } from '../../../../script.js';
 import { deleteWorldInfo } from '../../../world-info.js';
-import { BOOKMARK_VERSION, EXTENSION_VERSION, buildBookmarklet as makeBookmarklet, decodeHandoff, recordHandoff, deviceChecks, isPhone } from './connect.js?v=5.0.2';
+import { BOOKMARK_VERSION, EXTENSION_VERSION, bookmarkReady, buildBookmarklet as makeBookmarklet, decodeHandoff, encodeHandoff, recordHandoff, deviceChecks, isPhone } from './connect.js?v=5.0.4';
 
 const TAG = '[Bot Bazaar]';
 const SITE = 'https://janitorai.com';
@@ -2440,8 +2440,9 @@ function buildUi() {
             showConnect();
         }
         if (action === 'resume') resume();
-        if (action === 'copycode') copyText(buildBookmarklet(), 'Bookmark code copied.');
-        if (action === 'copycode-bare') copyText(buildBookmarklet({ bare: true }), 'Copied. In the address bar type  javascript:  and paste.');
+        if (action === 'copycode') bookmarkReady.then(() => copyText(buildBookmarklet(), 'Bookmark code copied.'));
+        if (action === 'copycode-bare') bookmarkReady.then(() => copyText(buildBookmarklet({ bare: true }), 'Copied. In the address bar type  javascript:  and paste.'));
+        if (action === 'export-login') exportLogin();
         if (action === 'copy-check') copyText(deviceCheckText(), 'Check copied.');
         const copy = event.target.closest('[data-copy]');
         if (copy) copyText(copy.dataset.copy, 'Copied. Paste it in a terminal opened in your SillyTavern folder.');
@@ -2686,22 +2687,35 @@ function deviceCheckText() {
         ...deviceChecks({ proxy: sauceProxyOk }).map(([ok, label]) => `${ok === null ? '?' : ok ? 'OK' : 'NO'}  ${label}`)].join('\n');
 }
 
+/** Copies a code holding every login connected here, to paste into Bot Bazaar on another device. */
+async function exportLogin() {
+    await ensureFreshJanitor();
+    const packet = { v: 1, bv: BOOKMARK_VERSION };
+    const janitor = janitorSession();
+    if (janitor?.access_token) packet.janitor = { access_token: janitor.access_token, refresh_token: janitor.refresh_token || '', expires_at: janitor.expires_at, apikey: janitor.apikey || '' };
+    if (chubAccount().key) packet.chub = chubAccount().key;
+    if (sauceAccount().token) packet.saucepan = sauceAccount().token;
+    if (!packet.janitor && !packet.chub && !packet.saucepan) return toastr.warning('Nothing is connected here yet. Connect a site first, then copy the code.', 'Bot Bazaar');
+    await copyText(await encodeHandoff(packet), 'Login code copied. On the other device open Bot Bazaar → Accounts → Have a code? and paste it.');
+}
+
 /** How to get the bookmark (or its no-bookmark twin) onto this device. Shared by every screen that needs it. */
 function bookmarkHelp() {
     const phone = isPhone();
     const steps = phone ? `
+        <p class="jai_note"><b>Chrome on Android often ignores these bookmarks</b> (it only runs them when you type their name in the address bar, and some versions never do). <b>Firefox for Android runs them reliably.</b> If this does nothing for you, use the code from your computer instead: it needs no bookmark on the phone.</p>
         <ol class="jai_steps">
             <li>${button('copycode', 'fa-copy', 'Copy bookmark code')}</li>
-            <li>In your browser, bookmark any page (menu <b>⋮</b> → <b>☆</b>). Then open <b>⋮ → Bookmarks</b>, press and hold that bookmark and choose <b>Edit</b>. Name it <b>bazaar</b>, delete its address, paste the code, save.</li>
-            <li>Open the site (signed in), tap the address bar, type <b>bazaar</b> and tap the bookmark in the suggestions. <span class="jai_note">(Android Chrome only runs it from the address bar, not from the bookmarks list.)</span></li>
+            <li>Bookmark any page, then edit that bookmark: name <b>bazaar</b>, address = the pasted code. (Firefox: ⋮ → <b>Bookmarks</b> → hold → <b>Edit</b>. Chrome: ⋮ → <b>Bookmarks</b> → hold → <b>Edit</b>.)</li>
+            <li>Open the site (signed in), tap the address bar, type <b>bazaar</b> and tap the bookmark in the <b>suggestions</b> (not in the bookmarks list).</li>
         </ol>
         <p><b>No bookmark at all:</b> ${button('copycode-bare', 'fa-copy', 'Copy code for the address bar')}</p>
-        <p class="jai_note">Open the signed-in site, tap the address bar, type <b>javascript:</b> yourself, paste, press Go. (Chrome removes the word "javascript:" from pasted text, so it has to be typed.) Nothing is saved, so repeat it when you want to bring in another bot.</p>`
+        <p class="jai_note">Open the signed-in site, tap the address bar, type <b>javascript:</b> yourself, paste, press Go. (Chrome removes the word "javascript:" from pasted text, so it has to be typed.)</p>`
         : `
         <ul>
             <li>Press <b>Ctrl+Shift+B</b> to show the bookmarks bar, then drag this onto it: <a class="jai_bookmarklet" href="${esc(buildBookmarklet())}" title="Drag me to the bookmarks bar">Bot Bazaar</a></li>
             <li>On the site (signed in), press it. A sheet appears at the bottom of the page and opens SillyTavern.</li>
-            <li>For a phone, open Bot Bazaar on the phone and make the bookmark there (this one only knows this computer's address).</li>
+            <li>For a phone, you don't need to repeat this: use <b>Take my logins to another device</b> below.</li>
         </ul>`;
     return `
         <details class="jai_bm" ${settings().bookmarkSeen && !phone ? '' : 'open'}>
@@ -2766,6 +2780,11 @@ function showConnect(reason = '') {
             <p class="jai_note">The sheet's <b>Copy code</b> button copies it. This works on every browser, even when the jump doesn't.</p>
             <textarea id="jai_token" class="text_pole" rows="3" spellcheck="false" autocapitalize="off" autocomplete="off" placeholder="bazaar:…"></textarea>
             ${actions(button('save', 'fa-plug', 'Connect'), button('paste', 'fa-paste', 'Paste & connect'))}
+        </details>
+        <details ${phone ? '' : 'open'}>
+            <summary><b>Take my logins to another device</b> (phone ⇄ computer)</summary>
+            <p class="jai_note">Connected here? Copy a code, send it to your other device in any notes or chat app, and paste it there under <b>Have a code?</b>. No bookmark is needed on the device that receives it. Use JanitorAI on one device at a time: both devices renewing the same login can log one of them out.</p>
+            ${actions(button('export-login', 'fa-copy', 'Copy login code'))}
         </details>
         <details>
             <summary>Check this device</summary>

@@ -89,6 +89,12 @@ on janitorai.com), so Bot Bazaar borrows the login your browser already has, wit
    Accounts → *Have a code?*, which works in every browser) and **Change address** (if the bookmark was made on another
    device, fix the SillyTavern address right there). Any failure is written out in red with a **Copy details** button.
 
+**Chrome on Android often ignores bookmarklets** (some versions only run them when you type the bookmark's name in the address
+bar, some never do); Firefox for Android runs them reliably. So there is a route that needs no bookmark on the phone:
+on a device that is already connected, open **Accounts → Take my logins to another device → Copy login code**, send it to
+the other device in any notes/chat app, and paste it there under **Have a code?**. Use JanitorAI on one device at a time,
+because two devices renewing the same login can log one out.
+
 **If it doesn't work on a phone:** open **Accounts → Check this device**. It lists what the browser can do, the
 SillyTavern address the bookmark will use, and what the last hand-over did (or that none arrived).
 Android Chrome only runs a `javascript:` bookmark from the address bar (type `bazaar`, tap the bookmark in the
