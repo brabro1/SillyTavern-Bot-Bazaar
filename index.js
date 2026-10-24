@@ -15,7 +15,7 @@
 
 import { deleteCharacter, processDroppedFiles } from '../../../../script.js';
 import { deleteWorldInfo } from '../../../world-info.js';
-import { BOOKMARK_VERSION, EXTENSION_VERSION, bookmarkReady, buildBookmarklet as makeBookmarklet, decodeHandoff, encodeHandoff, recordHandoff, deviceChecks, isPhone } from './connect.js?v=5.0.4';
+import { BOOKMARK_VERSION, EXTENSION_VERSION, bookmarkReady, buildBookmarklet as makeBookmarklet, decodeHandoff, encodeHandoff, recordHandoff, deviceChecks, isPhone } from './connect.js?v=5.0.5';
 
 const TAG = '[Bot Bazaar]';
 const SITE = 'https://janitorai.com';
@@ -4153,39 +4153,40 @@ function renderSauceCard(m) {
 
 /** Shown when SillyTavern's proxy is off: the one-time setup Saucepan needs. */
 const PROXY_COMMANDS = [
+    ['Android (Termux) — switch it on for good', 'cd ~/SillyTavern && sed -i \'s/enableCorsProxy: false/enableCorsProxy: true/\' config.yaml'],
+    ['Android (Termux) — or start SillyTavern with it on, this time only', 'cd ~/SillyTavern && node server.js --corsProxy'],
     ['Windows (PowerShell, in the SillyTavern folder)', '(Get-Content config.yaml) -replace \'enableCorsProxy: false\',\'enableCorsProxy: true\' | Set-Content config.yaml'],
-    ['Android (Termux)', 'cd ~/SillyTavern && sed -i \'s/enableCorsProxy: false/enableCorsProxy: true/\' config.yaml'],
     ['Linux', 'sed -i \'s/enableCorsProxy: false/enableCorsProxy: true/\' config.yaml'],
     ['Mac', 'sed -i \'\' \'s/enableCorsProxy: false/enableCorsProxy: true/\' config.yaml'],
 ];
 
 /**
- * The Saucepan tab when SillyTavern's proxy is off: everything works through the bookmark, pressed on the bot's
- * own Saucepan page. Browsing right here is the optional extra.
+ * The Saucepan tab when SillyTavern's proxy is off. Browsing and search need the proxy (Saucepan answers only its own
+ * website, and SillyTavern reads that setting only at start-up, so it cannot be switched on from here). The bookmark is
+ * the other half: it brings one bot's definition, which only Saucepan's own page shows.
  */
 function showSauceSetup() {
     hideViews();
     const sauce = sauceAccount();
+    const android = /Android/i.test(navigator.userAgent);
+    const commands = PROXY_COMMANDS.filter(([label]) => !android || /Android/.test(label));
     showMessage(`
         <div class="jai_shome">
-            <h3><i class="fa-solid fa-bowl-food"></i> Saucepan — no setup needed</h3>
-            <p>Saucepan only talks to its own website, so the <b>Bot Bazaar bookmark</b> does the work there, with your Saucepan login:</p>
+            <h3><i class="fa-solid fa-bowl-food"></i> Browse Saucepan here: one switch, once</h3>
+            <p>Saucepan only answers its own website, so SillyTavern has to pass the requests along. That is a built-in feature of SillyTavern that is <b>switched off by default</b>, and SillyTavern only reads the switch when it starts, so it can't be flipped from this screen.</p>
             <ol class="jai_steps jai_sauce_steps">
-                <li>${button('open-sauce', 'fa-up-right-from-square', 'Open Saucepan')} <span>find a bot you like (signed in).</span></li>
-                <li>On the bot's page, press the <b>Bot Bazaar</b> bookmark.</li>
-                <li>You land back here on that bot — tap <b>Import</b>. Its picture, tags and lorebooks come along.</li>
+                <li>${android ? 'Open <b>Termux</b>, stop SillyTavern (hold <b>Volume Down</b> and press <b>C</b>), then' : 'In the SillyTavern folder,'} run <b>one</b> of these:
+                    <div class="jai_cmds">${commands.map(([label, cmd]) => `
+                        <div class="jai_cmd"><span>${esc(label)}</span><code>${esc(cmd)}</code><span class="jai_btn jai_small" data-copy="${esc(cmd)}"><i class="fa-solid fa-copy"></i><span>Copy</span></span></div>`).join('')}
+                    </div>
+                </li>
+                <li>${android ? 'Start SillyTavern again (the same way you always do; skip this if you used the second command).' : 'Restart SillyTavern.'}</li>
+                <li>Reload this page and open Bot Bazaar → Saucepan. ${button('retry', 'fa-rotate', 'Try again')}</li>
             </ol>
-            <p class="jai_note">Every press also brings your Saucepan favorites into <b>Favorites</b>${settings().sauceFavsAt ? ` (last time ${esc(timeAgo(new Date(settings().sauceFavsAt).toISOString()))})` : ''}. You can also paste a Saucepan link in the search box above to see a bot's page and comments here.${sauce.token ? '' : ' Pressing it the first time also connects your account.'}</p>
+            <p class="jai_note">${android ? '' : 'Or open <b>config.yaml</b> and change <code>enableCorsProxy: false</code> to <code>enableCorsProxy: true</code>. '}Your Saucepan login ${sauce.token ? 'is already connected here' : 'comes with the login code or the bookmark'}.</p>
+            <h3><i class="fa-solid fa-bookmark"></i> A bot's definition needs the bookmark</h3>
+            <p class="jai_note">Saucepan shows a bot's definition and greetings only on its own page, so importing one needs the Bot Bazaar bookmark pressed on that page (it also brings the bot here, ready to import). Without it you can still browse, search, read comments and import lorebooks. On Android use <b>Firefox</b> for this; Chrome often ignores such bookmarks.</p>
             ${bookmarkHelp()}
-            <details>
-                <summary>Optional: browse and search Saucepan right here too</summary>
-                <p>That needs SillyTavern's built-in proxy switched on once. Run one line in your SillyTavern folder, then restart SillyTavern:</p>
-                <div class="jai_cmds">${PROXY_COMMANDS.map(([label, cmd]) => `
-                    <div class="jai_cmd"><span>${esc(label)}</span><code>${esc(cmd)}</code><span class="jai_btn jai_small" data-copy="${esc(cmd)}"><i class="fa-solid fa-copy"></i><span>Copy</span></span></div>`).join('')}
-                </div>
-                <p class="jai_note">Or open <b>config.yaml</b> and change <code>enableCorsProxy: false</code> to <code>enableCorsProxy: true</code>.</p>
-                ${actions(button('retry', 'fa-rotate', 'I switched it on — try again'))}
-            </details>
         </div>`);
 }
 
