@@ -14,7 +14,7 @@
  */
 
 export const BOOKMARK_VERSION = 5;
-export const EXTENSION_VERSION = '5.0.5';
+export const EXTENSION_VERSION = '5.1.0';
 
 const LAST_KEY = 'botBazaar.lastHandoff';
 const ADDRESS_KEY = 'botBazaar.st';

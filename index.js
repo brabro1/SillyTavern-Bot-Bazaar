@@ -15,12 +15,13 @@
 
 import { deleteCharacter, processDroppedFiles } from '../../../../script.js';
 import { deleteWorldInfo } from '../../../world-info.js';
-import { BOOKMARK_VERSION, EXTENSION_VERSION, bookmarkReady, buildBookmarklet as makeBookmarklet, decodeHandoff, encodeHandoff, recordHandoff, deviceChecks, isPhone } from './connect.js?v=5.0.5';
+import { BOOKMARK_VERSION, EXTENSION_VERSION, bookmarkReady, buildBookmarklet as makeBookmarklet, decodeHandoff, encodeHandoff, recordHandoff, deviceChecks, isPhone } from './connect.js?v=5.1.0';
 
 const TAG = '[Bot Bazaar]';
 const SITE = 'https://janitorai.com';
 const AVATARS = 'https://ella.janitorai.com/bot-avatars/';
 const USERSCRIPT_URL = new URL('janitor-bridge.user.js', import.meta.url).href;
+const BUTTON_SCRIPT_URL = new URL('bot-bazaar.user.js', import.meta.url).href;
 const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
 
 const ctx = () => SillyTavern.getContext();
@@ -2653,6 +2654,7 @@ function showMessage(html) {
     box.style.display = html ? '' : 'none';
 }
 
+const link = (href, icon, label) => `<a class="jai_btn" href="${esc(href)}" target="_blank" rel="noopener"><i class="fa-solid ${icon}"></i><span>${label}</span></a>`;
 const button = (action, icon, label) => `<div class="jai_btn" data-jai="${action}"><i class="fa-solid ${icon}"></i><span>${label}</span></div>`;
 const actions = (...buttons) => `<div class="jai_actions">${buttons.join('')}</div>`;
 
@@ -2703,6 +2705,7 @@ async function exportLogin() {
 function bookmarkHelp() {
     const phone = isPhone();
     const steps = phone ? `
+        <p><b>Easiest on a phone: a button instead of a bookmark.</b> In <b>Firefox</b> (or Kiwi) install a userscript manager (Violentmonkey or Tampermonkey), then ${link(BUTTON_SCRIPT_URL, 'fa-download', 'Install the Bot Bazaar button')}. A <b>Bot Bazaar</b> button then sits on every Saucepan, Chub and JanitorAI page; tap it. The first time it asks for your SillyTavern address (here: <b>${esc(location.origin)}</b>).</p>
         <p class="jai_note"><b>Chrome on Android often ignores these bookmarks</b> (it only runs them when you type their name in the address bar, and some versions never do). <b>Firefox for Android runs them reliably.</b> If this does nothing for you, use the code from your computer instead: it needs no bookmark on the phone.</p>
         <ol class="jai_steps">
             <li>${button('copycode', 'fa-copy', 'Copy bookmark code')}</li>
@@ -2715,6 +2718,7 @@ function bookmarkHelp() {
         <ul>
             <li>Press <b>Ctrl+Shift+B</b> to show the bookmarks bar, then drag this onto it: <a class="jai_bookmarklet" href="${esc(buildBookmarklet())}" title="Drag me to the bookmarks bar">Bot Bazaar</a></li>
             <li>On the site (signed in), press it. A sheet appears at the bottom of the page and opens SillyTavern.</li>
+            <li>Prefer a button on the page over a bookmark? Install a userscript manager (Tampermonkey, Violentmonkey), then ${link(BUTTON_SCRIPT_URL, 'fa-download', 'Install the Bot Bazaar button')}.</li>
             <li>For a phone, you don't need to repeat this: use <b>Take my logins to another device</b> below.</li>
         </ul>`;
     return `
@@ -2830,9 +2834,21 @@ async function checkClipboardForLogin() {
     await saveToken();
 }
 
-window.addEventListener('focus', () => setTimeout(checkClipboardForLogin, 300));
+/** Back from Saucepan with a definition copied: use it for the bot that is open. */
+async function checkClipboardForDefinition() {
+    const wait = state.awaitDefinition;
+    if (!wait || state.detail !== wait.id || !root?.classList.contains('jai_open') || !document.hasFocus()) return;
+    let text = '';
+    try { text = str(await navigator.clipboard.readText()).trim(); } catch { return; }
+    if (text.length < 200 || text === wait.last || /^bazaar:/.test(text) || extractToken(text)) return;
+    wait.last = text;
+    wait.apply(text);
+}
+
+const checkClipboard = () => setTimeout(() => { checkClipboardForLogin(); checkClipboardForDefinition(); }, 300);
+window.addEventListener('focus', checkClipboard);
 document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') setTimeout(checkClipboardForLogin, 300);
+    if (document.visibilityState === 'visible') checkClipboard();
 });
 
 async function pasteToken() {
@@ -4340,8 +4356,15 @@ async function openSauceDetail(id, preload = null) {
     if (!defSource) showDefinition(defResult);
     const defReady = defSource ? defSource.then(showDefinition).catch(error => showError(error)) : Promise.resolve();
 
+    // Without the bookmark or button, the definition can be copied from Saucepan's page: coming back here picks it up.
+    state.awaitDefinition = { id, last: '', apply: (text) => {
+        const def = sauceShownDefinition({ definition: text });
+        if (!def) return;
+        showDefinition({ status: 'ok', pasted: true, def });
+        toastr.success(`Picked up the definition you copied (${compact(text.length)} characters). Press "Import to SillyTavern", or paste the greeting too.`, 'Bot Bazaar', { timeOut: 12000 });
+    } };
     box.querySelector('.jai_sauce_fetch').addEventListener('click', () => {
-        toastr.info('On the Saucepan page that opened, press the Bot Bazaar bookmark — this bot comes back with its definition and greetings.', 'Bot Bazaar', { timeOut: 15000 });
+        toastr.info('On the Saucepan page: press the Bot Bazaar button or bookmark (definition and greetings come back by themselves). Without one: open Definition → Show, select all, copy, then come back here — Bot Bazaar picks it up.', 'Bot Bazaar', { timeOut: 20000 });
     });
     box.querySelector('.jai_sauce_paste').addEventListener('click', async () => {
         const { Popup } = ctx();

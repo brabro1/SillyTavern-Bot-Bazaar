@@ -89,6 +89,15 @@ on janitorai.com), so Bot Bazaar borrows the login your browser already has, wit
    Accounts → *Have a code?*, which works in every browser) and **Change address** (if the bookmark was made on another
    device, fix the SillyTavern address right there). Any failure is written out in red with a **Copy details** button.
 
+**A button instead of a bookmark (Firefox/Kiwi on a phone, any browser on a computer).** Install a userscript manager
+(Violentmonkey or Tampermonkey), then open `bot-bazaar.user.js` from this repository (or from the **Install the Bot Bazaar
+button** link in Accounts). A **Bot Bazaar** button then sits on Saucepan, Chub and JanitorAI pages; tapping it does exactly
+what the bookmark does, including reading a Saucepan bot's definition and greetings from its page. It asks once for your
+SillyTavern address. (`node build-userscript.mjs` rebuilds it from `bookmark.js`.)
+
+**No button and no bookmark?** On a Saucepan bot's page in Bot Bazaar, tap **Get definition from Saucepan**, open
+*Definition → Show* there, select all and copy, and come back: Bot Bazaar picks the definition up from your clipboard.
+
 **Chrome on Android often ignores bookmarklets** (some versions only run them when you type the bookmark's name in the address
 bar, some never do); Firefox for Android runs them reliably. So there is a route that needs no bookmark on the phone:
 on a device that is already connected, open **Accounts → Take my logins to another device → Copy login code**, send it to
